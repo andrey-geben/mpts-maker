@@ -1,0 +1,41 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Virtual environment ---
+.venv/
+venv/
+env/
+
+# --- PyCharm / IDE ---
+.idea/
+.vscode/
+*.swp
+
+# --- Nuitka build artifacts ---
+build/
+main.build/
+main.dist/
+main.onefile-build/
+nuitka-crash-report.xml
+*.build/
+*.dist/
+
+# --- FFmpeg binary (download separately, see README) ---
+ffmpeg.exe
+ffprobe.exe
+ffplay.exe
+
+# --- Local config / secrets ---
+config.json
+*.local
+.env
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+desktop.ini
