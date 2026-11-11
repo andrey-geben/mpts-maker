@@ -6,24 +6,39 @@ from datetime import datetime
 
 import psutil
 from PySide6.QtCore import Qt, QEvent, QByteArray, QThread, Signal
-from PySide6.QtGui import QAction, QBrush, QColor
+from PySide6.QtGui import QAction, QBrush, QColor, QGuiApplication
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QTreeWidget,
     QTreeWidgetItem, QTableWidget, QTableWidgetItem, QHeaderView,
     QToolBar, QFileDialog, QMessageBox, QDialog, QFormLayout,
     QLineEdit, QDialogButtonBox, QLabel, QPushButton, QFrame, QPlainTextEdit,
-    QApplication,
+    QApplication, QMenu,
 )
 
 from m3u_parser import Channel, parse_m3u
-from ffmpeg_manager import FFmpegProcess, explain_return_code, probe_url
+from ffmpeg_manager import (
+    FFmpegProcess, explain_return_code, probe_url,
+    check_required_tools, find_tool,
+)
 from system_monitor import SystemMonitor, shutdown_nvml
 from constants import APP_NAME, APP_COPYRIGHT, APP_VERSION, APP_AUTHOR
 from about_dialog import AboutDialog
 from wizard import MptsWizard
 from storage import load_config, save_config, CONFIG_VERSION
+from stream_validator import probe_mpts, ProgramInfo
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from PySide6.QtWidgets import (
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QTreeWidget,
+    QTreeWidgetItem, QTableWidget, QTableWidgetItem, QHeaderView,
+    QToolBar, QFileDialog, QMessageBox, QDialog, QFormLayout,
+    QLineEdit, QDialogButtonBox, QLabel, QPushButton, QFrame, QPlainTextEdit,
+    QApplication, QMenu, QGridLayout, QScrollArea,
+)
+
+# ---------------------------------------------------------------------------
+# Вспомогательные функции
+# ---------------------------------------------------------------------------
 
 def _format_speed(bps: float) -> str:
     if bps < 1000:
@@ -48,6 +63,19 @@ def _format_uptime(start: datetime | None) -> str:
         return f"{m}м {sec:02d}с"
     return f"{sec}с"
 
+
+def _copy_to_clipboard(text: str) -> bool:
+    """Копирует в буфер обмена. Возвращает True при успехе."""
+    try:
+        QGuiApplication.clipboard().setText(text)
+        return True
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Нижняя панель системных метрик
+# ---------------------------------------------------------------------------
 
 class FooterWidget(QWidget):
     def __init__(self, parent=None):
@@ -99,6 +127,10 @@ class FooterWidget(QWidget):
         )
 
 
+# ---------------------------------------------------------------------------
+# Диалог создания нового MPTS-профиля
+# ---------------------------------------------------------------------------
+
 class NewMptsDialog(QDialog):
     def __init__(self, default_name: str, parent=None):
         super().__init__(parent)
@@ -119,15 +151,16 @@ class NewMptsDialog(QDialog):
         return self.name_edit.text().strip(), self.url_edit.text().strip()
 
 
-class EditPlaylistDialog(QDialog):
-    """Диалог удаления каналов из плейлиста (в памяти, файл не изменяется)."""
+# ---------------------------------------------------------------------------
+# Диалог редактирования плейлиста (удаление каналов из списка)
+# ---------------------------------------------------------------------------
 
+class EditPlaylistDialog(QDialog):
     def __init__(self, playlist_name: str, channels: list[Channel],
                  usage_map: dict[str, list[str]], parent=None):
         super().__init__(parent)
         self.setWindowTitle(f"Редактирование плейлиста «{playlist_name}»")
         self.resize(780, 580)
-
         v = QVBoxLayout(self)
 
         hint = QLabel(
@@ -193,6 +226,10 @@ class EditPlaylistDialog(QDialog):
         return out
 
 
+# ---------------------------------------------------------------------------
+# Диалог правки каналов MPTS (удаление)
+# ---------------------------------------------------------------------------
+
 class RemoveChannelsDialog(QDialog):
     def __init__(self, mpts_name: str, channels: list[Channel], parent=None):
         super().__init__(parent)
@@ -255,6 +292,10 @@ class RemoveChannelsDialog(QDialog):
                     out.append(ch)
         return out
 
+
+# ---------------------------------------------------------------------------
+# Диалог добавления каналов в MPTS (замена)
+# ---------------------------------------------------------------------------
 
 class ReplaceChannelsDialog(QDialog):
     def __init__(self, mpts_name: str, available_channels: list[Channel],
@@ -319,13 +360,17 @@ class ReplaceChannelsDialog(QDialog):
         return out
 
 
+# ---------------------------------------------------------------------------
+# Диалог информации о потоке (статус, ошибки, журнал, копирование URL)
+# ---------------------------------------------------------------------------
+
 class StreamInfoDialog(QDialog):
     def __init__(self, parent, name: str, profile: dict, on_restart):
         super().__init__(parent)
         self.profile = profile
         self.on_restart = on_restart
         self.setWindowTitle(f"Информация о потоке «{name}»")
-        self.resize(900, 640)
+        self.resize(900, 660)
 
         v = QVBoxLayout(self)
         status = profile.get("last_status", "Остановлен")
@@ -336,17 +381,48 @@ class StreamInfoDialog(QDialog):
         banner.setAlignment(Qt.AlignCenter)
         if is_error:
             banner.setText(f"<b>Ошибка</b> · {name}")
-            banner.setStyleSheet("background:#ffe1e1; color:#8b0000; font-size:14px; padding:10px; border-radius:4px;")
+            banner.setStyleSheet(
+                "background:#ffe1e1; color:#8b0000; font-size:14px; "
+                "padding:10px; border-radius:4px;"
+            )
         elif status == "Работает":
             banner.setText(f"<b>Работает</b> · {name}")
-            banner.setStyleSheet("background:#e6ffe6; color:#006600; font-size:14px; padding:10px; border-radius:4px;")
+            banner.setStyleSheet(
+                "background:#e6ffe6; color:#006600; font-size:14px; "
+                "padding:10px; border-radius:4px;"
+            )
         elif status == "Завершён":
             banner.setText(f"<b>Завершён</b> · {name}")
-            banner.setStyleSheet("background:#fff4d6; color:#7a5d00; font-size:14px; padding:10px; border-radius:4px;")
+            banner.setStyleSheet(
+                "background:#fff4d6; color:#7a5d00; font-size:14px; "
+                "padding:10px; border-radius:4px;"
+            )
         else:
             banner.setText(f"<b>Остановлен</b> · {name}")
-            banner.setStyleSheet("background:#eeeeee; color:#333333; font-size:14px; padding:10px; border-radius:4px;")
+            banner.setStyleSheet(
+                "background:#eeeeee; color:#333333; font-size:14px; "
+                "padding:10px; border-radius:4px;"
+            )
         v.addWidget(banner)
+
+        # --- Блок URL с кнопкой «Копировать» ---
+        url_row = QHBoxLayout()
+        url_label = QLabel(f"<b>URL вывода:</b> {profile['url']}")
+        url_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        url_label.setWordWrap(True)
+        url_label.setStyleSheet(
+            "background:#f4f4f4; border:1px solid #cccccc; "
+            "border-radius:4px; padding:8px;"
+        )
+        url_row.addWidget(url_label, 1)
+
+        self.copy_url_btn = QPushButton("📋 Копировать URL")
+        self.copy_url_btn.setToolTip(
+            "Скопировать URL вывода для настройки PBI головной станции"
+        )
+        self.copy_url_btn.clicked.connect(self._copy_url)
+        url_row.addWidget(self.copy_url_btn, 0, Qt.AlignTop)
+        v.addLayout(url_row)
 
         if is_error and profile.get("last_error"):
             short_reason, _ = profile["last_error"]
@@ -381,7 +457,6 @@ class StreamInfoDialog(QDialog):
             v.addWidget(help_text)
 
         info_form = QFormLayout()
-        info_form.addRow("<b>URL вывода:</b>", QLabel(profile["url"]))
         info_form.addRow("<b>Каналов:</b>", QLabel(str(len(profile["channels"]))))
         if profile.get("started_at"):
             info_form.addRow("<b>Запущен:</b>",
@@ -408,9 +483,9 @@ class StreamInfoDialog(QDialog):
 
         row = QHBoxLayout()
         row.addStretch(1)
-        copy_btn = QPushButton("Копировать журнал")
-        copy_btn.clicked.connect(self._copy_log)
-        row.addWidget(copy_btn)
+        copy_log_btn = QPushButton("Копировать журнал")
+        copy_log_btn.clicked.connect(self._copy_log)
+        row.addWidget(copy_log_btn)
         self.restart_btn = QPushButton("Перезапустить")
         self.restart_btn.setEnabled(status != "Работает")
         self.restart_btn.clicked.connect(self._restart)
@@ -420,6 +495,17 @@ class StreamInfoDialog(QDialog):
         close_btn.clicked.connect(self.accept)
         row.addWidget(close_btn)
         v.addLayout(row)
+
+    def _copy_url(self):
+        ok = _copy_to_clipboard(self.profile["url"])
+        if ok:
+            QMessageBox.information(
+                self, "Скопировано",
+                f"URL вывода скопирован в буфер обмена:\n\n{self.profile['url']}"
+            )
+        else:
+            QMessageBox.warning(self, "Ошибка",
+                                "Не удалось скопировать URL в буфер обмена.")
 
     def _copy_log(self):
         QApplication.clipboard().setText(self.log_box.toPlainText())
@@ -431,7 +517,382 @@ class StreamInfoDialog(QDialog):
         self.on_restart()
 
 
+# ---------------------------------------------------------------------------
+# Диалог проверки MPTS по каналам (ffprobe)
+# ---------------------------------------------------------------------------
+
+class StreamCheckDialog(QDialog):
+    def __init__(self, parent, name: str, url: str, programs: list[ProgramInfo]):
+        super().__init__(parent)
+        self.setWindowTitle(f"Проверка потока «{name}»")
+        self.resize(860, 560)
+
+        v = QVBoxLayout(self)
+
+        url_label = QLabel(f"<b>URL:</b> {url}")
+        url_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        url_label.setWordWrap(True)
+        url_label.setStyleSheet(
+            "background:#f4f4f4; border:1px solid #cccccc; "
+            "border-radius:4px; padding:8px;"
+        )
+        v.addWidget(url_label)
+
+        summary = QLabel(f"Найдено программ (каналов): <b>{len(programs)}</b>")
+        summary.setStyleSheet("margin: 8px 0; font-size: 13px;")
+        v.addWidget(summary)
+
+        table = QTableWidget(0, 5)
+        table.setHorizontalHeaderLabels(
+            ["№", "Service Name", "Provider", "Видео", "Аудио"]
+        )
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        table.verticalHeader().setVisible(False)
+        table.setSelectionBehavior(QTableWidget.SelectRows)
+        table.setEditTriggers(QTableWidget.NoEditTriggers)
+
+        for i, prog in enumerate(programs):
+            table.insertRow(i)
+            if prog.error:
+                for col in range(5):
+                    item = QTableWidgetItem(prog.error if col == 1 else "—")
+                    item.setForeground(QBrush(QColor("#8b0000")))
+                    table.setItem(i, col, item)
+                continue
+
+            video_desc = self._format_streams(prog.streams, "video")
+            audio_desc = self._format_streams(prog.streams, "audio")
+
+            table.setItem(i, 0, QTableWidgetItem(str(prog.program_num)))
+            table.setItem(i, 1, QTableWidgetItem(prog.service_name))
+            table.setItem(i, 2, QTableWidgetItem(prog.service_provider))
+            table.setItem(i, 3, QTableWidgetItem(video_desc or "—"))
+            table.setItem(i, 4, QTableWidgetItem(audio_desc or "—"))
+
+        v.addWidget(table, 1)
+
+        btns = QDialogButtonBox(QDialogButtonBox.Ok)
+        btns.button(QDialogButtonBox.Ok).setText("Закрыть")
+        btns.accepted.connect(self.accept)
+        v.addWidget(btns)
+
+    @staticmethod
+    def _format_streams(streams, codec_type: str) -> str:
+        parts = []
+        for s in streams:
+            if s.codec_type != codec_type:
+                continue
+            if codec_type == "video":
+                if s.width and s.height:
+                    parts.append(f"{s.codec_name} {s.width}x{s.height}")
+                else:
+                    parts.append(s.codec_name or "video")
+            else:
+                ch = f" {s.channels}ch" if s.channels else ""
+                sr = f" {s.sample_rate}Hz" if s.sample_rate else ""
+                parts.append(f"{s.codec_name}{ch}{sr}".strip())
+        return ", ".join(parts) if parts else "—"
+
+# ---------------------------------------------------------------------------
+# Визуальная проверка MPTS: лампочки по каналам
+# ---------------------------------------------------------------------------
+
+class StreamVisualCheckDialog(QDialog):
+    COLORS = {
+        "ok":      "#4caf50",   # зелёный
+        "partial": "#ffb300",   # жёлтый
+        "error":   "#f44336",   # красный
+        "missing": "#9e9e9e",   # серый
+    }
+    MARKS = {
+        "ok": "[OK]",
+        "partial": "[PART]",
+        "error": "[FAIL]",
+        "missing": "[MISS]",
+    }
+    COLS = 8   # лампочек в ряд
+
+    def __init__(self, parent, name: str, url: str,
+                 channels: list[Channel],
+                 programs: list[ProgramInfo],
+                 ffprobe_path: str):
+        super().__init__(parent)
+        self.name = name
+        self.url = url
+        self.channels = list(channels)
+        self.programs = sorted(programs, key=lambda p: p.program_num)
+        self.ffprobe_path = ffprobe_path
+        self._worker: _CheckWorker | None = None
+
+        self.setWindowTitle(f"Визуальная проверка «{name}»")
+        self.resize(960, 620)
+
+        v = QVBoxLayout(self)
+
+        url_label = QLabel(f"<b>URL:</b> {url}")
+        url_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        url_label.setWordWrap(True)
+        url_label.setStyleSheet(
+            "background:#f4f4f4; border:1px solid #cccccc; "
+            "border-radius:4px; padding:8px;"
+        )
+        v.addWidget(url_label)
+
+        self.summary_label = QLabel()
+        self.summary_label.setWordWrap(True)
+        self.summary_label.setStyleSheet("font-size: 13px; margin: 6px 0;")
+        v.addWidget(self.summary_label)
+
+        # Легенда
+        legend_row = QHBoxLayout()
+        legend_row.addWidget(self._make_legend_item("#4caf50", "работает"))
+        legend_row.addWidget(self._make_legend_item("#ffb300", "частично (только видео / только аудио)"))
+        legend_row.addWidget(self._make_legend_item("#f44336", "ошибка / нет потоков"))
+        legend_row.addWidget(self._make_legend_item("#9e9e9e", "программа не найдена"))
+        legend_row.addStretch(1)
+        v.addLayout(legend_row)
+
+        # Скроллируемая сетка лампочек
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.NoFrame)
+        self.scroll.setStyleSheet("background: #fafafa;")
+        self._grid_widget = QWidget()
+        self._grid = QGridLayout(self._grid_widget)
+        self._grid.setContentsMargins(8, 8, 8, 8)
+        self._grid.setHorizontalSpacing(8)
+        self._grid.setVerticalSpacing(12)
+        self.scroll.setWidget(self._grid_widget)
+        v.addWidget(self.scroll, 1)
+
+        # Кнопки
+        btn_row = QHBoxLayout()
+
+        self.refresh_btn = QPushButton("🔄 Обновить")
+        self.refresh_btn.setToolTip(
+            "Повторить анализ потока через ffprobe"
+        )
+        self.refresh_btn.clicked.connect(self._refresh)
+        btn_row.addWidget(self.refresh_btn)
+
+        details_btn = QPushButton("📊 Таблица подробностей")
+        details_btn.setToolTip(
+            "Открыть подробную таблицу программ (service_name, кодеки)"
+        )
+        details_btn.clicked.connect(self._show_details)
+        btn_row.addWidget(details_btn)
+
+        copy_btn = QPushButton("📋 Копировать отчёт")
+        copy_btn.setToolTip(
+            "Скопировать текстовый отчёт о проверке в буфер обмена"
+        )
+        copy_btn.clicked.connect(self._copy_report)
+        btn_row.addWidget(copy_btn)
+
+        btn_row.addStretch(1)
+
+        close_btn = QPushButton("Закрыть")
+        close_btn.setDefault(True)
+        close_btn.clicked.connect(self.accept)
+        btn_row.addWidget(close_btn)
+
+        v.addLayout(btn_row)
+
+        self._rebuild_grid()
+
+    # ---------- построение сетки ---------------------------------------
+    def _statuses(self) -> list[tuple[str, str]]:
+        """Возвращает [(status, detail), …] для каждого канала профиля."""
+        result: list[tuple[str, str]] = []
+        for i, ch in enumerate(self.channels):
+            if i >= len(self.programs):
+                result.append(("missing", "Программа не найдена в потоке"))
+                continue
+            prog = self.programs[i]
+            if prog.error:
+                result.append(("error", prog.error))
+                continue
+            has_v = any(s.codec_type == "video" for s in prog.streams)
+            has_a = any(s.codec_type == "audio" for s in prog.streams)
+            if has_v and has_a:
+                result.append(("ok", "видео + аудио"))
+            elif has_v:
+                result.append(("partial", "только видео"))
+            elif has_a:
+                result.append(("partial", "только аудио"))
+            else:
+                result.append(("error", "нет потоков в программе"))
+        return result
+
+    def _rebuild_grid(self):
+        # Очищаем сетку
+        while self._grid.count():
+            item = self._grid.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+
+        statuses = self._statuses()
+
+        if not statuses:
+            lbl = QLabel("В профиле нет каналов")
+            lbl.setAlignment(Qt.AlignCenter)
+            lbl.setStyleSheet("color: gray; font-size: 14px;")
+            self._grid.addWidget(lbl, 0, 0, 1, self.COLS)
+        else:
+            for i, (status, detail) in enumerate(statuses):
+                row = i // self.COLS
+                col = i % self.COLS
+                widget = self._make_lamp_widget(status, detail, i)
+                self._grid.addWidget(widget, row, col, Qt.AlignTop)
+
+        self.summary_label.setText(self._compute_summary())
+
+    def _make_lamp_widget(self, status: str, detail: str, index: int) -> QWidget:
+        ch = self.channels[index]
+        color = self.COLORS.get(status, "#9e9e9e")
+
+        w = QWidget()
+        w.setMinimumWidth(90)
+        w.setMaximumWidth(120)
+        v = QVBoxLayout(w)
+        v.setContentsMargins(2, 2, 2, 2)
+        v.setSpacing(3)
+
+        # Сама лампочка
+        lamp = QLabel()
+        lamp.setFixedSize(38, 38)
+        lamp.setStyleSheet(
+            f"background: {color}; "
+            f"border-radius: 19px; "
+            f"border: 2px solid #444444;"
+        )
+        v.addWidget(lamp, 0, Qt.AlignHCenter)
+
+        # Номер канала
+        num = QLabel(str(index + 1))
+        num.setAlignment(Qt.AlignCenter)
+        num.setStyleSheet("font-weight: bold; font-size: 11px; color: #333;")
+        v.addWidget(num)
+
+        # Имя канала
+        name = QLabel(ch.name)
+        name.setAlignment(Qt.AlignCenter)
+        name.setWordWrap(True)
+        name.setStyleSheet("font-size: 10px; color: #555;")
+        name.setMaximumHeight(30)
+        v.addWidget(name)
+
+        tooltip = f"{ch.name}\nСтатус: {detail}\nURL источника: {ch.url}"
+        if index < len(self.programs):
+            prog = self.programs[index]
+            tooltip += f"\nProgram #{prog.program_num}, PID: {prog.pmt_pid or '—'}"
+        w.setToolTip(tooltip)
+        lamp.setToolTip(tooltip)
+        name.setToolTip(tooltip)
+
+        return w
+
+    def _make_legend_item(self, color: str, text: str) -> QWidget:
+        w = QWidget()
+        h = QHBoxLayout(w)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(6)
+
+        dot = QLabel()
+        dot.setFixedSize(14, 14)
+        dot.setStyleSheet(
+            f"background: {color}; border-radius: 7px; border: 1px solid #333;"
+        )
+        h.addWidget(dot)
+
+        label = QLabel(text)
+        label.setStyleSheet("font-size: 11px; color: #444;")
+        h.addWidget(label)
+        return w
+
+    def _compute_summary(self) -> str:
+        statuses = self._statuses()
+        total = len(statuses)
+        ok = sum(1 for s, _ in statuses if s == "ok")
+        partial = sum(1 for s, _ in statuses if s == "partial")
+        bad = total - ok - partial
+
+        header = (
+            f"<b>Программ в потоке:</b> {len(self.programs)} &nbsp;/&nbsp; "
+            f"<b>каналов в профиле:</b> {total}<br>"
+        )
+
+        parts = []
+        if ok:
+            parts.append(
+                f"<span style='color:#2e7d32; font-weight:bold'>"
+                f"✔ работает: {ok}</span>"
+            )
+        if partial:
+            parts.append(
+                f"<span style='color:#ef6c00; font-weight:bold'>"
+                f"⚠ частично: {partial}</span>"
+            )
+        if bad:
+            parts.append(
+                f"<span style='color:#c62828; font-weight:bold'>"
+                f"✖ не работают: {bad}</span>"
+            )
+        if not parts:
+            parts.append("<span style='color:gray'>нет данных</span>")
+
+        return header + " &nbsp;&nbsp; ".join(parts)
+
+# ---------- действия ----------------------------------------------
+    def _refresh(self):
+        # Безопасная проверка: объект мог быть удалён
+        if self._worker is not None:
+            try:
+                if self._worker.isRunning():
+                    return
+            except RuntimeError:
+                # C++ объект уже удалён — просто сбрасываем ссылку
+                self._worker = None
+
+        self._worker = None
+        self.refresh_btn.setEnabled(False)
+        self.summary_label.setText("Проверка…")
+
+        worker = _CheckWorker(
+            self.url, self.ffprobe_path, timeout_s=10, parent=self
+        )
+        worker.done.connect(self._on_refresh_done)
+        worker.finished.connect(self._on_worker_finished)
+        worker.finished.connect(worker.deleteLater)
+        self._worker = worker
+        worker.start()
+
+    def _on_worker_finished(self):
+        """Сбрасываем Python-ссылку, когда поток завершился."""
+        self._worker = None
+
+    def _on_refresh_done(self, programs: list[ProgramInfo], error: str):
+        self.refresh_btn.setEnabled(True)
+        if error:
+            QMessageBox.warning(
+                self, "Ошибка обновления",
+                f"Не удалось повторно проверить поток:\n\n{error}"
+            )
+            self.summary_label.setText(self._compute_summary())
+            return
+        self.programs = sorted(programs, key=lambda p: p.program_num)
+        self._rebuild_grid()
+# ---------------------------------------------------------------------------
+# Фоновые воркеры
+# ---------------------------------------------------------------------------
+
 class _ProbeWorker(QThread):
+    """Параллельная проверка каналов перед запуском MPTS."""
     done = Signal(list)
 
     def __init__(self, channels, ffmpeg_path, timeout_s=5, parent=None):
@@ -457,26 +918,369 @@ class _ProbeWorker(QThread):
         self.done.emit(results)
 
 
+class _CheckWorker(QThread):
+    """Анализ MPTS через ffprobe в фоне."""
+    done = Signal(list, str)  # (programs, error)
+
+    def __init__(self, url: str, ffprobe_path: str,
+                 timeout_s: int = 10, parent=None):
+        super().__init__(parent)
+        self.url = url
+        self.ffprobe_path = ffprobe_path
+        self.timeout_s = timeout_s
+
+    def run(self):
+        programs, error = probe_mpts(
+            self.url, self.ffprobe_path, self.timeout_s
+        )
+        self.done.emit(programs, error)
+
+class StreamVisualCheckDialog(QDialog):
+    COLORS = {
+        "ok":      "#4caf50",
+        "partial": "#ffb300",
+        "error":   "#f44336",
+        "missing": "#9e9e9e",
+    }
+    MARKS = {
+        "ok": "[OK]",
+        "partial": "[PART]",
+        "error": "[FAIL]",
+        "missing": "[MISS]",
+    }
+    COLS = 8
+
+    def __init__(self, parent, name: str, url: str,
+                 channels: list[Channel],
+                 programs: list[ProgramInfo],
+                 ffprobe_path: str):
+        super().__init__(parent)
+        self.name = name
+        self.url = url
+        self.channels = list(channels)
+        self.programs = sorted(programs, key=lambda p: p.program_num)
+        self.ffprobe_path = ffprobe_path
+        self._worker: _CheckWorker | None = None
+
+        self.setWindowTitle(f"Визуальная проверка «{name}»")
+        self.resize(960, 620)
+
+        v = QVBoxLayout(self)
+
+        url_label = QLabel(f"<b>URL:</b> {url}")
+        url_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        url_label.setWordWrap(True)
+        url_label.setStyleSheet(
+            "background:#f4f4f4; border:1px solid #cccccc; "
+            "border-radius:4px; padding:8px;"
+        )
+        v.addWidget(url_label)
+
+        self.summary_label = QLabel()
+        self.summary_label.setWordWrap(True)
+        self.summary_label.setStyleSheet("font-size: 13px; margin: 6px 0;")
+        v.addWidget(self.summary_label)
+
+        # Легенда
+        legend_row = QHBoxLayout()
+        legend_row.addWidget(self._make_legend_item("#4caf50", "работает"))
+        legend_row.addWidget(self._make_legend_item(
+            "#ffb300", "частично (только видео / только аудио)"
+        ))
+        legend_row.addWidget(self._make_legend_item(
+            "#f44336", "ошибка / нет потоков"
+        ))
+        legend_row.addWidget(self._make_legend_item(
+            "#9e9e9e", "программа не найдена"
+        ))
+        legend_row.addStretch(1)
+        v.addLayout(legend_row)
+
+        # Скроллируемая сетка лампочек
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.NoFrame)
+        self.scroll.setStyleSheet("background: #fafafa;")
+        self._grid_widget = QWidget()
+        self._grid = QGridLayout(self._grid_widget)
+        self._grid.setContentsMargins(8, 8, 8, 8)
+        self._grid.setHorizontalSpacing(8)
+        self._grid.setVerticalSpacing(12)
+        self.scroll.setWidget(self._grid_widget)
+        v.addWidget(self.scroll, 1)
+
+        # Кнопки
+        btn_row = QHBoxLayout()
+
+        self.refresh_btn = QPushButton("🔄 Обновить")
+        self.refresh_btn.setToolTip("Повторить анализ потока через ffprobe")
+        self.refresh_btn.clicked.connect(self._refresh)
+        btn_row.addWidget(self.refresh_btn)
+
+        details_btn = QPushButton("📊 Таблица подробностей")
+        details_btn.setToolTip(
+            "Открыть подробную таблицу программ (service_name, кодеки)"
+        )
+        details_btn.clicked.connect(self._show_details)
+        btn_row.addWidget(details_btn)
+
+        copy_btn = QPushButton("📋 Копировать отчёт")
+        copy_btn.setToolTip(
+            "Скопировать текстовый отчёт о проверке в буфер обмена"
+        )
+        copy_btn.clicked.connect(self._copy_report)
+        btn_row.addWidget(copy_btn)
+
+        btn_row.addStretch(1)
+
+        close_btn = QPushButton("Закрыть")
+        close_btn.setDefault(True)
+        close_btn.clicked.connect(self.accept)
+        btn_row.addWidget(close_btn)
+
+        v.addLayout(btn_row)
+
+        self._rebuild_grid()
+
+    # ---------- построение сетки ---------------------------------------
+    def _statuses(self) -> list[tuple[str, str]]:
+        result: list[tuple[str, str]] = []
+        for i, ch in enumerate(self.channels):
+            if i >= len(self.programs):
+                result.append(("missing", "Программа не найдена в потоке"))
+                continue
+            prog = self.programs[i]
+            if prog.error:
+                result.append(("error", prog.error))
+                continue
+            has_v = any(s.codec_type == "video" for s in prog.streams)
+            has_a = any(s.codec_type == "audio" for s in prog.streams)
+            if has_v and has_a:
+                result.append(("ok", "видео + аудио"))
+            elif has_v:
+                result.append(("partial", "только видео"))
+            elif has_a:
+                result.append(("partial", "только аудио"))
+            else:
+                result.append(("error", "нет потоков в программе"))
+        return result
+
+    def _rebuild_grid(self):
+        while self._grid.count():
+            item = self._grid.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+
+        statuses = self._statuses()
+
+        if not statuses:
+            lbl = QLabel("В профиле нет каналов")
+            lbl.setAlignment(Qt.AlignCenter)
+            lbl.setStyleSheet("color: gray; font-size: 14px;")
+            self._grid.addWidget(lbl, 0, 0, 1, self.COLS)
+        else:
+            for i, (status, detail) in enumerate(statuses):
+                row = i // self.COLS
+                col = i % self.COLS
+                widget = self._make_lamp_widget(status, detail, i)
+                self._grid.addWidget(widget, row, col, Qt.AlignTop)
+
+        self.summary_label.setText(self._compute_summary())
+
+    def _make_lamp_widget(self, status: str, detail: str, index: int) -> QWidget:
+        ch = self.channels[index]
+        color = self.COLORS.get(status, "#9e9e9e")
+
+        w = QWidget()
+        w.setMinimumWidth(90)
+        w.setMaximumWidth(120)
+        v = QVBoxLayout(w)
+        v.setContentsMargins(2, 2, 2, 2)
+        v.setSpacing(3)
+
+        lamp = QLabel()
+        lamp.setFixedSize(38, 38)
+        lamp.setStyleSheet(
+            f"background: {color}; "
+            f"border-radius: 19px; "
+            f"border: 2px solid #444444;"
+        )
+        v.addWidget(lamp, 0, Qt.AlignHCenter)
+
+        num = QLabel(str(index + 1))
+        num.setAlignment(Qt.AlignCenter)
+        num.setStyleSheet("font-weight: bold; font-size: 11px; color: #333;")
+        v.addWidget(num)
+
+        name = QLabel(ch.name)
+        name.setAlignment(Qt.AlignCenter)
+        name.setWordWrap(True)
+        name.setStyleSheet("font-size: 10px; color: #555;")
+        name.setMaximumHeight(30)
+        v.addWidget(name)
+
+        tooltip = f"{ch.name}\nСтатус: {detail}\nURL источника: {ch.url}"
+        if index < len(self.programs):
+            prog = self.programs[index]
+            tooltip += (
+                f"\nProgram #{prog.program_num}, PID: {prog.pmt_pid or '—'}"
+            )
+        w.setToolTip(tooltip)
+        lamp.setToolTip(tooltip)
+        name.setToolTip(tooltip)
+
+        return w
+
+    def _make_legend_item(self, color: str, text: str) -> QWidget:
+        w = QWidget()
+        h = QHBoxLayout(w)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(6)
+
+        dot = QLabel()
+        dot.setFixedSize(14, 14)
+        dot.setStyleSheet(
+            f"background: {color}; border-radius: 7px; border: 1px solid #333;"
+        )
+        h.addWidget(dot)
+
+        label = QLabel(text)
+        label.setStyleSheet("font-size: 11px; color: #444;")
+        h.addWidget(label)
+        return w
+
+    def _compute_summary(self) -> str:
+        statuses = self._statuses()
+        total = len(statuses)
+        ok = sum(1 for s, _ in statuses if s == "ok")
+        partial = sum(1 for s, _ in statuses if s == "partial")
+        bad = total - ok - partial
+
+        header = (
+            f"<b>Программ в потоке:</b> {len(self.programs)} &nbsp;/&nbsp; "
+            f"<b>каналов в профиле:</b> {total}<br>"
+        )
+
+        parts = []
+        if ok:
+            parts.append(
+                f"<span style='color:#2e7d32; font-weight:bold'>"
+                f"✔ работает: {ok}</span>"
+            )
+        if partial:
+            parts.append(
+                f"<span style='color:#ef6c00; font-weight:bold'>"
+                f"⚠ частично: {partial}</span>"
+            )
+        if bad:
+            parts.append(
+                f"<span style='color:#c62828; font-weight:bold'>"
+                f"✖ не работают: {bad}</span>"
+            )
+        if not parts:
+            parts.append("<span style='color:gray'>нет данных</span>")
+
+        return header + " &nbsp;&nbsp; ".join(parts)
+
+    # ---------- действия ----------------------------------------------
+    def _refresh(self):
+        # Безопасная проверка: объект мог быть удалён
+        if self._worker is not None:
+            try:
+                if self._worker.isRunning():
+                    return
+            except RuntimeError:
+                self._worker = None
+
+        self._worker = None
+        self.refresh_btn.setEnabled(False)
+        self.summary_label.setText("Проверка…")
+
+        worker = _CheckWorker(
+            self.url, self.ffprobe_path, timeout_s=10, parent=self
+        )
+        worker.done.connect(self._on_refresh_done)
+        worker.finished.connect(self._on_worker_finished)
+        worker.finished.connect(worker.deleteLater)
+        self._worker = worker
+        worker.start()
+
+    def _on_worker_finished(self):
+        """Сбрасываем Python-ссылку, когда поток завершился."""
+        self._worker = None
+
+    def _on_refresh_done(self, programs: list[ProgramInfo], error: str):
+        self.refresh_btn.setEnabled(True)
+        if error:
+            QMessageBox.warning(
+                self, "Ошибка обновления",
+                f"Не удалось повторно проверить поток:\n\n{error}"
+            )
+            self.summary_label.setText(self._compute_summary())
+            return
+        self.programs = sorted(programs, key=lambda p: p.program_num)
+        self._rebuild_grid()
+
+    def _show_details(self):
+        dlg = StreamCheckDialog(self, self.name, self.url, self.programs)
+        dlg.exec()
+
+    def _copy_report(self):
+        lines = [
+            f"Проверка MPTS «{self.name}»",
+            f"URL: {self.url}",
+            f"Каналов в профиле: {len(self.channels)}",
+            f"Программ в потоке: {len(self.programs)}",
+            "",
+        ]
+        statuses = self._statuses()
+        for i, (status, detail) in enumerate(statuses):
+            mark = self.MARKS.get(status, "[?]")
+            ch = self.channels[i]
+            lines.append(f"{mark} {i + 1:>2}. {ch.name} — {detail}")
+            if i < len(self.programs):
+                prog = self.programs[i]
+                if prog.service_name and prog.service_name != "—":
+                    lines.append(f"        service_name: {prog.service_name}")
+
+        text = "\n".join(lines)
+        if _copy_to_clipboard(text):
+            QMessageBox.information(
+                self, "Скопировано",
+                "Отчёт проверки скопирован в буфер обмена."
+            )
+        else:
+            QMessageBox.warning(
+                self, "Ошибка",
+                "Не удалось скопировать отчёт в буфер обмена."
+            )
+# ---------------------------------------------------------------------------
+# Главное окно
+# ---------------------------------------------------------------------------
+
 class MainWindow(QMainWindow):
     COLS = ["MPTS", "URL вывода", "Каналы", "Статус", "FPS", "Битрейт", "Действия"]
     COL_TIPS = [
         "Имя MPTS-потока",
-        "Куда отправляется поток (UDP multicast)",
+        "Куда отправляется поток (UDP multicast). Правый клик — копировать",
         "Сколько каналов включено в поток",
         "Текущее состояние. Клик по ячейке откроет подробности",
         "Кадров в секунду (сбрасывается при остановке)",
         "Битрейт (сбрасывается при остановке)",
-        "▶ запуск · ■ стоп · ℹ подробности · ✎ правка каналов · ✖ удалить MPTS",
+        "▶ запуск · ■ стоп · ℹ подробности · ✎ правка · 📋 копировать URL · "
+        "🔍 проверить · ✖ удалить",
     ]
     ACTION_COL = 6
     STATUS_COL = 3
     FPS_COL = 4
     BITRATE_COL = 5
+    URL_COL = 1
 
     def __init__(self):
         super().__init__()
         self.setWindowTitle(f"{APP_NAME} v{APP_VERSION} — {APP_AUTHOR}")
-        self.resize(1400, 800)
+        self.resize(1440, 800)
 
         self.channels: list[Channel] = []
         self.profiles: dict[str, dict] = {}
@@ -485,9 +1289,11 @@ class MainWindow(QMainWindow):
         self._restoring = False
         self._last_playlist: str = ""
         self._probe_workers: list[_ProbeWorker] = []
+        self._check_workers: list[_CheckWorker] = []
 
         self._build_ui()
         self._build_menu()
+        self._check_tools_at_startup()
 
         self.sys_monitor = SystemMonitor(interval=2.0)
         self.sys_monitor.updated.connect(self._on_system)
@@ -515,8 +1321,10 @@ class MainWindow(QMainWindow):
 
         tb.addSeparator()
         for text, tip, slot in [
-            ("▶ Запустить выделенные", "Запустить все выделенные в таблице MPTS", self.on_start_selected),
-            ("■ Остановить выделенные", "Остановить все выделенные в таблице MPTS", self.on_stop_selected),
+            ("▶ Запустить выделенные",
+             "Запустить все выделенные в таблице MPTS", self.on_start_selected),
+            ("■ Остановить выделенные",
+             "Остановить все выделенные в таблице MPTS", self.on_stop_selected),
         ]:
             a = QAction(text, self)
             a.setToolTip(tip)
@@ -533,7 +1341,7 @@ class MainWindow(QMainWindow):
         self.splitter = QSplitter(Qt.Horizontal)
         vbox.addWidget(self.splitter, 1)
 
-        # ---------- Левая панель: плейлист-бар + дерево ----------
+        # ---------- Левая панель: панель плейлиста + дерево ----------
         left = QWidget()
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(0, 0, 0, 0)
@@ -547,13 +1355,13 @@ class MainWindow(QMainWindow):
         self.playlist_label = QLabel("Плейлист не загружен")
         self.playlist_label.setStyleSheet("color: gray;")
         self.playlist_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.playlist_label.setToolTip("Текущий загруженный плейлист")
         pl_layout.addWidget(self.playlist_label, 1)
 
         self.edit_playlist_btn = QPushButton("✎")
         self.edit_playlist_btn.setFixedSize(30, 26)
         self.edit_playlist_btn.setToolTip(
-            "Редактировать плейлист: убрать каналы из списка (файл на диске не изменяется)"
+            "Редактировать плейлист: убрать каналы из списка "
+            "(файл на диске не изменяется)"
         )
         self.edit_playlist_btn.setEnabled(False)
         self.edit_playlist_btn.clicked.connect(self.on_edit_playlist)
@@ -562,15 +1370,14 @@ class MainWindow(QMainWindow):
         self.delete_playlist_btn = QPushButton("✖")
         self.delete_playlist_btn.setFixedSize(30, 26)
         self.delete_playlist_btn.setToolTip(
-            "Удалить (закрыть) плейлист из программы (файл на диске не изменяется)"
+            "Удалить (закрыть) плейлист из программы "
+            "(файл на диске не изменяется)"
         )
         self.delete_playlist_btn.setEnabled(False)
         self.delete_playlist_btn.clicked.connect(self.on_delete_playlist)
         pl_layout.addWidget(self.delete_playlist_btn)
 
-        pl_bar.setStyleSheet(
-            "background: #f5f5f5; border-bottom: 1px solid #d0d0d0;"
-        )
+        pl_bar.setStyleSheet("background: #f5f5f5; border-bottom: 1px solid #d0d0d0;")
         left_layout.addWidget(pl_bar)
 
         self.tree = QTreeWidget()
@@ -594,32 +1401,37 @@ class MainWindow(QMainWindow):
 
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(1, QHeaderView.Stretch)
+        header.setSectionResizeMode(self.URL_COL, QHeaderView.Stretch)
         header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(self.STATUS_COL, QHeaderView.Interactive)
-        self.table.setColumnWidth(self.STATUS_COL, 280)
+        self.table.setColumnWidth(self.STATUS_COL, 240)
         header.setSectionResizeMode(self.FPS_COL, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(self.BITRATE_COL, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(self.ACTION_COL, QHeaderView.Fixed)
-        self.table.setColumnWidth(self.ACTION_COL, 210)
+        self.table.setColumnWidth(self.ACTION_COL, 275)
         self.table.verticalHeader().setDefaultSectionSize(34)
 
         self.table.itemSelectionChanged.connect(self._on_mpts_selected)
         self.table.cellClicked.connect(self._on_cell_clicked)
         self.table.cellDoubleClicked.connect(self._on_cell_dblclick)
 
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._on_table_context_menu)
+
         self.table.viewport().setMouseTracking(True)
         self.table.viewport().installEventFilter(self)
 
         self.splitter.addWidget(self.table)
-        self.splitter.setSizes([550, 850])
+        self.splitter.setSizes([550, 890])
 
         self.log = QLabel("Готово")
         self.log.setStyleSheet("padding: 4px 8px;")
         vbox.addWidget(self.log)
 
         self.footer = FooterWidget()
-        self.footer.setStyleSheet("background: #f0f0f0; border-top: 1px solid #d0d0d0;")
+        self.footer.setStyleSheet(
+            "background: #f0f0f0; border-top: 1px solid #d0d0d0;"
+        )
         vbox.addWidget(self.footer)
 
         self.copyright_label = QLabel(APP_COPYRIGHT)
@@ -647,6 +1459,44 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(text, 8000)
         self.log.setText(text)
 
+    # ---------------- проверка утилит на старте -------------------------
+    def _check_tools_at_startup(self):
+        ok, missing = check_required_tools()
+        if ok:
+            return
+
+        box = QMessageBox(self)
+        box.setWindowTitle("Не найдены утилиты FFmpeg")
+        box.setIcon(QMessageBox.Warning)
+        box.setText(
+            "В папке программы не найдены следующие файлы:\n\n"
+            + "\n".join(f"  • {m}" for m in missing)
+            + "\n\nОни нужны для работы:\n"
+            "  • ffmpeg.exe — запуск MPTS-потоков\n"
+            "  • ffprobe.exe — проверка сформированных потоков по каналам"
+        )
+        box.setInformativeText(
+            "Скачайте оба файла и положите рядом с main.exe / main.py.\n\n"
+            "Готовая команда PowerShell:\n"
+            "Invoke-WebRequest -Uri \"https://github.com/BtbN/FFmpeg-Builds/"
+            "releases/download/latest/ffmpeg-master-latest-win64-gpl.zip\" "
+            "-OutFile \"$env:TEMP\\ffmpeg.zip\"; "
+            "Expand-Archive -Path \"$env:TEMP\\ffmpeg.zip\" "
+            "-DestinationPath \"$env:TEMP\\ffmpeg_extract\" -Force; "
+            "Copy-Item \"$env:TEMP\\ffmpeg_extract\\ffmpeg-master-latest-win64-gpl"
+            "\\bin\\ffmpeg.exe\" -Destination \".\\ffmpeg.exe\"; "
+            "Copy-Item \"$env:TEMP\\ffmpeg_extract\\ffmpeg-master-latest-win64-gpl"
+            "\\bin\\ffprobe.exe\" -Destination \".\\ffprobe.exe\"; "
+            "Remove-Item \"$env:TEMP\\ffmpeg.zip\", "
+            "\"$env:TEMP\\ffmpeg_extract\" -Recurse -Force"
+        )
+        box.setStandardButtons(QMessageBox.Ok)
+        box.exec()
+
+        self._hint(
+            f"Не найдены: {', '.join(missing)} — программа работает не полностью"
+        )
+
     def _update_playlist_bar(self):
         if self.channels and self._last_playlist:
             name = os.path.basename(self._last_playlist)
@@ -657,7 +1507,9 @@ class MainWindow(QMainWindow):
             self.edit_playlist_btn.setEnabled(True)
             self.delete_playlist_btn.setEnabled(True)
         elif self.channels:
-            self.playlist_label.setText(f"Плейлист — каналов: {len(self.channels)}")
+            self.playlist_label.setText(
+                f"Плейлист — каналов: {len(self.channels)}"
+            )
             self.playlist_label.setStyleSheet("color: #333; font-weight: bold;")
             self.edit_playlist_btn.setEnabled(True)
             self.delete_playlist_btn.setEnabled(True)
@@ -667,7 +1519,8 @@ class MainWindow(QMainWindow):
             self.edit_playlist_btn.setEnabled(False)
             self.delete_playlist_btn.setEnabled(False)
 
-    # ---------------- сессия --------------------------------------------
+
+# ---------------- сохранение/восстановление сессии ------------------
     def _restore_session(self):
         cfg = load_config()
 
@@ -763,7 +1616,6 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-    # ---------------- курсор над статусом --------------------------------
     def eventFilter(self, obj, event):
         if obj is self.table.viewport() and event.type() == QEvent.MouseMove:
             idx = self.table.indexAt(event.pos())
@@ -773,7 +1625,7 @@ class MainWindow(QMainWindow):
                 self.table.viewport().setCursor(Qt.ArrowCursor)
         return super().eventFilter(obj, event)
 
-    # ---------------- M3U -----------------------------------------------
+    # ---------------- M3U ----------------------------------------------
     def on_load_m3u(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "Загрузить плейлист", "",
@@ -789,8 +1641,10 @@ class MainWindow(QMainWindow):
             self.channels = parse_m3u(path)
         except Exception as e:
             if not silent:
-                QMessageBox.critical(self, "Ошибка",
-                                     f"Не удалось разобрать плейлист:\n{e}")
+                QMessageBox.critical(
+                    self, "Ошибка",
+                    f"Не удалось разобрать плейлист:\n{e}"
+                )
             return False
 
         self._last_playlist = path
@@ -900,7 +1754,6 @@ class MainWindow(QMainWindow):
 
         removed_urls = {c.url for c in to_remove}
 
-        # Предупреждение: если каналы используются в MPTS
         used_lines: list[str] = []
         for ch in to_remove:
             if ch.url in usage:
@@ -939,7 +1792,10 @@ class MainWindow(QMainWindow):
             self._hint("Плейлист не загружен")
             return
 
-        name = os.path.basename(self._last_playlist) if self._last_playlist else "плейлист"
+        name = (
+            os.path.basename(self._last_playlist)
+            if self._last_playlist else "плейлист"
+        )
         res = QMessageBox.question(
             self, "Удалить плейлист",
             f"Удалить плейлист «{name}» из программы?\n\n"
@@ -958,12 +1814,10 @@ class MainWindow(QMainWindow):
         self._last_playlist = ""
         self._rebuild_tree()
         self._update_playlist_bar()
-
-        # Дерево пустое — галочек нет, но MPTS-профили сохраняют свой состав
         self._save_session()
         self._hint("Плейлист удалён из программы. MPTS-профили не изменены.")
 
-    # ---------------- MPTS ----------------------------------------------
+    # ---------------- MPTS ---------------------------------------------
     def on_add_mpts(self):
         default = f"MPTS-{len(self.profiles) + 1}"
         dlg = NewMptsDialog(default, self)
@@ -1005,8 +1859,8 @@ class MainWindow(QMainWindow):
         self.table.setItem(row, self.FPS_COL, QTableWidgetItem("-"))
         self.table.setItem(row, self.BITRATE_COL, QTableWidgetItem("-"))
 
-        play_btn, stop_btn, info_btn, edit_btn, delete_btn = \
-            self._create_action_cell(row, name)
+        (play_btn, stop_btn, info_btn, edit_btn,
+         copy_btn, check_btn, delete_btn) = self._create_action_cell(row, name)
 
         self.profiles[name] = {
             "url": url,
@@ -1017,6 +1871,8 @@ class MainWindow(QMainWindow):
             "stop_btn": stop_btn,
             "info_btn": info_btn,
             "edit_btn": edit_btn,
+            "copy_btn": copy_btn,
+            "check_btn": check_btn,
             "delete_btn": delete_btn,
             "last_status": "Остановлен",
             "last_error": None,
@@ -1031,33 +1887,49 @@ class MainWindow(QMainWindow):
         w = QWidget()
         h = QHBoxLayout(w)
         h.setContentsMargins(4, 2, 4, 2)
-        h.setSpacing(4)
+        h.setSpacing(3)
 
         play_btn = QPushButton("▶")
-        play_btn.setFixedSize(30, 26)
+        play_btn.setFixedSize(28, 26)
         play_btn.setToolTip(f"Запустить «{name}»")
         play_btn.clicked.connect(lambda _=False, n=name: self._start_mpts(n))
 
         stop_btn = QPushButton("■")
-        stop_btn.setFixedSize(30, 26)
+        stop_btn.setFixedSize(28, 26)
         stop_btn.setToolTip(f"Остановить «{name}»")
         stop_btn.setEnabled(False)
         stop_btn.clicked.connect(lambda _=False, n=name: self._stop_mpts(n))
 
         info_btn = QPushButton("ℹ")
-        info_btn.setFixedSize(30, 26)
+        info_btn.setFixedSize(28, 26)
         info_btn.setToolTip(f"Подробности о «{name}»")
         info_btn.clicked.connect(lambda _=False, n=name: self._show_stream_info(n))
 
         edit_btn = QPushButton("✎")
-        edit_btn.setFixedSize(30, 26)
+        edit_btn.setFixedSize(28, 26)
         edit_btn.setToolTip(f"Правка каналов «{name}»")
         edit_btn.clicked.connect(
             lambda _=False, n=name: self._remove_channels_from_profile(n)
         )
 
+        copy_btn = QPushButton("📋")
+        copy_btn.setFixedSize(28, 26)
+        copy_btn.setToolTip(
+            f"Скопировать URL вывода «{name}» для настройки PBI/приёмника"
+        )
+        copy_btn.clicked.connect(lambda _=False, n=name: self._copy_output_url(n))
+
+        check_btn = QPushButton("🔍")
+        check_btn.setFixedSize(28, 26)
+        check_btn.setToolTip(
+            f"Проверить каналы в потоке «{name}» через ffprobe"
+        )
+        check_btn.clicked.connect(
+            lambda _=False, n=name: self._check_mpts_stream(n)
+        )
+
         delete_btn = QPushButton("✖")
-        delete_btn.setFixedSize(30, 26)
+        delete_btn.setFixedSize(28, 26)
         delete_btn.setToolTip(
             f"Удалить MPTS «{name}» (каналы останутся в плейлисте)"
         )
@@ -1065,15 +1937,14 @@ class MainWindow(QMainWindow):
             lambda _=False, n=name: self._delete_profile_with_confirm(n)
         )
 
-        h.addWidget(play_btn)
-        h.addWidget(stop_btn)
-        h.addWidget(info_btn)
-        h.addWidget(edit_btn)
-        h.addWidget(delete_btn)
+        for b in (play_btn, stop_btn, info_btn, edit_btn,
+                  copy_btn, check_btn, delete_btn):
+            h.addWidget(b)
         h.addStretch(1)
 
         self.table.setCellWidget(row, self.ACTION_COL, w)
-        return play_btn, stop_btn, info_btn, edit_btn, delete_btn
+        return (play_btn, stop_btn, info_btn, edit_btn,
+                copy_btn, check_btn, delete_btn)
 
     def _on_mpts_selected(self):
         rows = self.table.selectionModel().selectedRows()
@@ -1087,7 +1958,8 @@ class MainWindow(QMainWindow):
             n = len(self.profiles[self.current_mpts]["channels"])
             self._hint(
                 f"Выбран «{self.current_mpts}» (каналов: {n}). "
-                f"✎ — правка каналов, ✖ — удалить MPTS."
+                f"📋 — копировать URL, 🔍 — проверить поток, "
+                f"✎ — правка, ✖ — удалить."
             )
 
     def on_start_selected(self):
@@ -1106,6 +1978,68 @@ class MainWindow(QMainWindow):
         for r in rows:
             self._stop_mpts(self.table.item(r.row(), 0).text())
 
+    # ---------------- копирование URL -----------------------------------
+    def _copy_output_url(self, name: str):
+        prof = self.profiles.get(name)
+        if not prof:
+            return
+        url = prof["url"]
+        if _copy_to_clipboard(url):
+            self._hint(f"URL «{name}» скопирован: {url}")
+        else:
+            QMessageBox.warning(self, "Ошибка",
+                                "Не удалось скопировать URL в буфер обмена.")
+
+    def _copy_name(self, name: str):
+        if _copy_to_clipboard(name):
+            self._hint(f"Имя MPTS скопировано: {name}")
+
+    def _on_table_context_menu(self, pos):
+        idx = self.table.indexAt(pos)
+        if not idx.isValid():
+            return
+        row = idx.row()
+        name_item = self.table.item(row, 0)
+        if not name_item:
+            return
+        name = name_item.text()
+        prof = self.profiles.get(name)
+        if not prof:
+            return
+
+        is_running = (
+            prof["process"] and prof["process"].process
+            and prof["process"].process.poll() is None
+        )
+
+        menu = QMenu(self.table)
+
+        act_copy_url = menu.addAction("📋  Копировать URL вывода")
+        act_copy_url.setToolTip(
+            "Для настройки PBI головной станции или приёмника"
+        )
+        act_copy_url.triggered.connect(lambda: self._copy_output_url(name))
+
+        act_copy_name = menu.addAction("Копировать имя MPTS")
+        act_copy_name.triggered.connect(lambda: self._copy_name(name))
+
+        menu.addSeparator()
+
+        act_check = menu.addAction("🔍  Проверить поток (ffprobe)")
+        act_check.triggered.connect(lambda: self._check_mpts_stream(name))
+
+        act_info = menu.addAction("ℹ  Подробности")
+        act_info.triggered.connect(lambda: self._show_stream_info(name))
+
+        act_edit = menu.addAction("✎  Правка каналов")
+        act_edit.setEnabled(not is_running)
+        act_edit.triggered.connect(
+            lambda: self._remove_channels_from_profile(name)
+        )
+
+        menu.exec(self.table.viewport().mapToGlobal(pos))
+
+    # ---------------- удаление профиля целиком --------------------------
     def _delete_profile_with_confirm(self, name: str):
         prof = self.profiles.get(name)
         if not prof:
@@ -1164,6 +2098,7 @@ class MainWindow(QMainWindow):
         self._hint(f"MPTS «{name}» удалён из списка")
         self._save_session()
 
+    # ---------------- правка каналов профиля ----------------------------
     def _remove_channels_from_profile(self, name: str):
         prof = self.profiles.get(name)
         if not prof:
@@ -1260,6 +2195,75 @@ class MainWindow(QMainWindow):
                             f"Всего: {len(prof['channels'])}."
                         )
 
+    # ---------------- проверка MPTS через ffprobe -----------------------
+    def _check_mpts_stream(self, name: str):
+        prof = self.profiles.get(name)
+        if not prof:
+            return
+        url = prof["url"]
+
+        ffprobe_path = find_tool("ffprobe")
+        if not ffprobe_path:
+            QMessageBox.warning(
+                self, "ffprobe.exe не найден",
+                "Файл ffprobe.exe не найден рядом с программой.\n\n"
+                "Проверка сформированных MPTS по каналам недоступна, "
+                "пока вы его не добавите.\n"
+                "Скачайте ffprobe.exe (см. README) и положите его "
+                "рядом с ffmpeg.exe."
+            )
+            self._hint("Проверка MPTS отменена: ffprobe.exe не найден")
+            return
+
+        self._hint(f"Анализ потока «{name}» ({url}) через ffprobe…")
+
+        worker = _CheckWorker(url, ffprobe_path, timeout_s=10, parent=self)
+        worker.done.connect(
+            lambda programs, error, n=name, u=url:
+            self._on_check_done(n, u, programs, error)
+        )
+        worker.finished.connect(worker.deleteLater)
+        self._check_workers.append(worker)
+        worker.start()
+
+    @staticmethod
+    def _clean_workers(workers: list) -> list:
+        """Убирает из списка воркеров, которые уже удалены или не работают."""
+        alive = []
+        for w in workers:
+            try:
+                if w.isRunning():
+                    alive.append(w)
+            except RuntimeError:
+                pass
+        return alive
+
+
+    def _on_check_done(self, name: str, url: str,
+                       programs: list[ProgramInfo], error: str):
+        self._check_workers = self._clean_workers(self._check_workers)
+
+        if error:
+            QMessageBox.warning(
+                self, "Ошибка проверки",
+                f"Не удалось проанализировать поток «{name}»:\n\n{error}"
+            )
+            self._hint(f"«{name}»: ошибка проверки")
+            return
+
+        prof = self.profiles.get(name)
+        if not prof:
+            return
+
+        ffprobe_path = find_tool("ffprobe") or ""
+        self._hint(f"«{name}»: найдено программ — {len(programs)}")
+
+        dlg = StreamVisualCheckDialog(
+            self, name, url, prof["channels"], programs, ffprobe_path
+        )
+        dlg.exec()
+
+    # ---------------- запуск с pre-flight -------------------------------
     def _start_mpts(self, name: str):
         prof = self.profiles.get(name)
         if not prof:
@@ -1271,6 +2275,18 @@ class MainWindow(QMainWindow):
         if prof["process"] and prof["process"].process and \
                 prof["process"].process.poll() is None:
             self._hint(f"«{name}» уже запущен")
+            return
+
+        ffmpeg_path = find_tool("ffmpeg")
+        if not ffmpeg_path:
+            QMessageBox.critical(
+                self, "ffmpeg.exe не найден",
+                "Файл ffmpeg.exe не найден рядом с программой.\n\n"
+                "Запуск MPTS-потоков невозможен.\n"
+                "Скачайте ffmpeg.exe (см. README) и положите его "
+                "в папку программы."
+            )
+            self._hint("Запуск отменён: ffmpeg.exe не найден")
             return
 
         prof["last_error"] = None
@@ -1289,7 +2305,7 @@ class MainWindow(QMainWindow):
 
         self._hint(f"Проверка {len(prof['channels'])} каналов для «{name}»…")
 
-        worker = _ProbeWorker(prof["channels"], "./ffmpeg.exe",
+        worker = _ProbeWorker(prof["channels"], ffmpeg_path,
                               timeout_s=5, parent=self)
         worker.done.connect(
             lambda results, n=name: self._apply_probe_results(n, results)
@@ -1303,7 +2319,7 @@ class MainWindow(QMainWindow):
         if not prof:
             return
 
-        self._probe_workers = [w for w in self._probe_workers if w.isRunning()]
+        self._probe_workers = self._clean_workers(self._probe_workers)
 
         ok_channels = [ch for ch, ok, _ in results if ok]
         failed = [(ch, err) for ch, ok, err in results if not ok]
@@ -1325,7 +2341,8 @@ class MainWindow(QMainWindow):
             lines = "\n".join(f"• {ch.name}: {err}" for ch, err in failed)
             res = QMessageBox.question(
                 self, "Часть каналов недоступна",
-                f"Не удалось открыть {len(failed)} из {len(prof['channels'])} каналов:\n\n"
+                f"Не удалось открыть {len(failed)} из "
+                f"{len(prof['channels'])} каналов:\n\n"
                 f"{lines}\n\n"
                 f"Запустить MPTS с {len(ok_channels)} рабочими каналами?\n\n"
                 f"(Отсутствующие будут исключены из этого MPTS.)",
@@ -1362,6 +2379,19 @@ class MainWindow(QMainWindow):
         if not prof or not prof["channels"]:
             return
 
+        ffmpeg_path = find_tool("ffmpeg")
+        if not ffmpeg_path:
+            status_item = self.table.item(prof["row"], self.STATUS_COL)
+            status_item.setText("Ошибка: ffmpeg.exe не найден")
+            status_item.setBackground(QBrush(QColor("#ffe1e1")))
+            status_item.setForeground(QBrush(QColor("#8b0000")))
+            status_item.setToolTip(
+                "Файл ffmpeg.exe не найден рядом с программой.\n"
+                "Скачайте ffmpeg.exe (см. README) и положите в папку программы."
+            )
+            self._hint(f"«{name}»: ffmpeg.exe не найден — запуск отменён")
+            return
+
         prof["started_at"] = datetime.now()
         prof["last_log_tail"] = "(журнал пуст)"
         self.table.item(prof["row"], self.FPS_COL).setText("-")
@@ -1377,7 +2407,7 @@ class MainWindow(QMainWindow):
             name=name,
             urls=[c.url for c in prof["channels"]],
             output_url=prof["url"],
-            ffmpeg_path="./ffmpeg.exe",
+            ffmpeg_path=ffmpeg_path,
         )
         proc.stats_updated.connect(self._on_stats)
         proc.status_changed.connect(self._on_status)
@@ -1385,7 +2415,7 @@ class MainWindow(QMainWindow):
         proc.error_occurred.connect(self._on_error)
         proc.start()
         prof["process"] = proc
-        self._hint(f"Запуск «{name}»…")
+        self._hint(f"Запуск «{name}»… URL: {prof['url']}")
 
     def _stop_mpts(self, name: str):
         prof = self.profiles.get(name)
@@ -1395,6 +2425,7 @@ class MainWindow(QMainWindow):
             prof["started_at"] = None
             self._hint(f"Остановлен «{name}»")
 
+    # ---------------- FFmpeg -> UI --------------------------------------
     def _on_stats(self, name: str, stats: dict):
         prof = self.profiles.get(name)
         if not prof:
@@ -1419,7 +2450,10 @@ class MainWindow(QMainWindow):
         if is_running:
             item.setBackground(QBrush(QColor("#e6ffe6")))
             item.setForeground(QBrush(QColor("#006600")))
-            item.setToolTip("Поток работает. Клик по ячейке откроет подробности.")
+            item.setToolTip(
+                f"Поток работает. URL: {prof['url']}\n"
+                f"Клик по ячейке — подробности. 📋 — копировать URL."
+            )
             prof["last_error"] = None
         else:
             self.table.item(prof["row"], self.FPS_COL).setText("-")
@@ -1453,7 +2487,8 @@ class MainWindow(QMainWindow):
             else:
                 btn.setEnabled(not is_running)
 
-    def _on_error(self, name: str, short_reason: str, full_log: str, return_code: int):
+    def _on_error(self, name: str, short_reason: str,
+                  full_log: str, return_code: int):
         prof = self.profiles.get(name)
         if not prof:
             return
@@ -1463,13 +2498,17 @@ class MainWindow(QMainWindow):
         prof["started_at"] = None
 
         item = self.table.item(prof["row"], self.STATUS_COL)
-        short_display = short_reason if len(short_reason) <= 70 else short_reason[:67] + "…"
+        short_display = (
+            short_reason if len(short_reason) <= 70
+            else short_reason[:67] + "…"
+        )
         item.setText(f"Ошибка: {short_display}")
         item.setBackground(QBrush(QColor("#ffe1e1")))
         item.setForeground(QBrush(QColor("#8b0000")))
         item.setToolTip(
             f"{short_reason}\n\n"
-            "Клик по этой ячейке откроет подробности, код возврата и рекомендации."
+            "Клик по этой ячейке откроет подробности, код возврата "
+            "и рекомендации."
         )
 
         self._hint(f"«{name}»: {short_reason} — клик по статусу откроет подробности")
@@ -1488,6 +2527,7 @@ class MainWindow(QMainWindow):
             return
         self.log.setText(f"[{name}] {line[:140]}")
 
+    # ---------------- клики по таблице ----------------------------------
     def _on_cell_clicked(self, row: int, col: int):
         if col != self.STATUS_COL:
             return
@@ -1512,9 +2552,11 @@ class MainWindow(QMainWindow):
         dlg = StreamInfoDialog(self, name, prof, restart)
         dlg.exec()
 
+    # ---------------- системный монитор ---------------------------------
     def _on_system(self, data: dict):
         self.footer.update_metrics(data)
 
+    # ---------------- завершение ----------------------------------------
     def closeEvent(self, event):
         self._save_session()
         self.sys_monitor.stop()
@@ -1523,3 +2565,5 @@ class MainWindow(QMainWindow):
             if prof["process"]:
                 prof["process"].stop()
         super().closeEvent(event)
+
+# === КОНЕЦ  ===

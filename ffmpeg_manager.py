@@ -1,6 +1,9 @@
 # Copyright (c) 2026 Andrey Geben
 # SPDX-License-Identifier: MIT
 
+import os
+import shutil
+import sys
 import re
 import subprocess
 import threading
@@ -8,6 +11,38 @@ from collections import deque
 
 from PySide6.QtCore import QObject, Signal
 
+
+
+def app_dir() -> str:
+    """Папка приложения: рядом с main.exe (frozen) или с main.py (исходники)."""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def find_tool(name: str) -> str | None:
+    """
+    Ищет утилиту в такой последовательности:
+      1. рядом с приложением (ffmpeg.exe / ffmpeg)
+      2. в PATH
+    Возвращает полный путь или None.
+    """
+    base = app_dir()
+    candidates = [name + ".exe", name] if os.name == "nt" else [name]
+    for fname in candidates:
+        p = os.path.join(base, fname)
+        if os.path.isfile(p):
+            return p
+    return shutil.which(name)
+
+
+def check_required_tools() -> tuple[bool, list[str]]:
+    """Проверяет наличие ffmpeg и ffprobe. Возвращает (ok, список отсутствующих)."""
+    missing: list[str] = []
+    for tool in ("ffmpeg", "ffprobe"):
+        if find_tool(tool) is None:
+            missing.append(tool + ".exe")
+    return (len(missing) == 0, missing)
 
 # Типовые ошибки FFmpeg → человеческое объяснение на русском.
 # Порядок важен: первое совпадение выигрывает.

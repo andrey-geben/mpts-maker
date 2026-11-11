@@ -18,6 +18,7 @@ env/
 
 # --- Nuitka build artifacts ---
 build/
+dist/
 main.build/
 main.dist/
 main.onefile-build/
