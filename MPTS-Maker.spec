@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('app.ico', '.')]
+datas = [('vlc_lib', 'vlc_lib'), ('app.ico', '.')]
 binaries = [('ffmpeg.exe', '.'), ('ffprobe.exe', '.')]
 hiddenimports = []
 tmp_ret = collect_all('PySide6')

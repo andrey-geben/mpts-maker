@@ -227,17 +227,29 @@ class FFmpegProcess(QObject):
             "-hide_banner", "-nostdin",
             "-loglevel", "error",
             "-progress", "pipe:1",
+            "-fflags", "+genpts+igndts",
+            "-avoid_negative_ts", "make_zero",
         ]
+
         for url in self.urls:
             if url.startswith(("http://", "https://")):
                 cmd += ["-reconnect", "1", "-reconnect_streamed", "1",
                         "-reconnect_delay_max", "5"]
             cmd += ["-i", url]
 
-        for i in range(len(self.urls)):
-            cmd += ["-map", f"{i}:v?", "-map", f"{i}:a?"]
+        # Используем 'title' для задания имени сервиса (service_name) в SDT
+        for i, url in enumerate(self.urls):
+            cmd += [
+                "-program", f"title=Channel_{i + 1}:st={i * 2}:st={i * 2 + 1}",
+                "-map", f"{i}:v?", "-map", f"{i}:a?"
+            ]
 
-        cmd += ["-c", "copy", "-f", "mpegts", self.output_url]
+        cmd += ["-c", "copy"]
+        cmd += ["-bsf:v", "dump_extra=freq=keyframe"]
+        cmd += ["-mpegts_flags", "+resend_headers+initial_discontinuity"]
+        cmd += ["-muxdelay", "0.1", "-muxpreload", "0.1"]
+        cmd += ["-f", "mpegts", self.output_url]
+
         return cmd
 
     def start(self):

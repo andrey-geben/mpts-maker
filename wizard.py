@@ -20,19 +20,25 @@ class MptsWizard(QDialog):
       Затем вопрос «Продолжим?» → снова шаг 2 с тем же плейлистом.
     """
 
-    def __init__(self, parent, existing_profiles: dict[str, list]):
+    def __init__(self, parent, existing_profiles: dict[str, list],
+                 preset_channels: list[Channel] | None = None):
         super().__init__(parent)
         self.existing_profiles: dict[str, list[Channel]] = {
             name: list(chans) for name, chans in existing_profiles.items()
         }
         self.created_profiles: list[tuple[str, str, list[Channel]]] = []
 
-        self.channels: list[Channel] = []
-        self.playlist_path: str = ""
+        # Если передан готовый список из редактора — используем его
+        self.channels: list[Channel] = list(preset_channels) if preset_channels else []
+        self._preset_used: bool = bool(preset_channels)
+        self.playlist_path: str = "(рабочие каналы)" if preset_channels else ""
 
         self.setWindowTitle("Мастер создания MPTS")
         self.resize(900, 680)
         self._build_ui()
+        if self.channels:
+            self._populate_tree()
+            self.stack.setCurrentIndex(1)
         self._update_buttons()
 
     # ---------- UI -------------------------------------------------------
@@ -153,7 +159,7 @@ class MptsWizard(QDialog):
     def _update_buttons(self):
         i = self.stack.currentIndex()
         idx = len(self.existing_profiles) + len(self.created_profiles) + 1
-        self.back_btn.setEnabled(i > 0)
+        self.back_btn.setEnabled(i > 0 and not (self._preset_used and i == 1))
 
         if i == 0:
             self.title.setText("Шаг 1 — загрузка плейлиста")
@@ -175,9 +181,15 @@ class MptsWizard(QDialog):
                 "Каналы, уже включённые в другие MPTS, подсвечены жёлтым — "
                 "при повторном использовании мастер спросит подтверждение."
             )
-            self.subtitle.setText(
-                "Выбрано 0 каналов. Чтобы продолжить, выберите хотя бы один канал."
-            )
+            if self._preset_used:
+                self.subtitle.setText(
+                    f"Каналы из рабочего плейлиста ({len(self.channels)}). "
+                    f"Отметьте те, что войдут в этот MPTS."
+                )
+            else:
+                self.subtitle.setText(
+                    "Выбрано 0 каналов. Чтобы продолжить, выберите хотя бы один канал."
+                )
             self.next_btn.setText("Далее")
             self.next_btn.setToolTip("Перейти к настройке имени и адреса вывода")
             self.next_btn.setEnabled(self._selected_count() > 0)
