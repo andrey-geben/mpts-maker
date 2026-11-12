@@ -41,16 +41,30 @@ if _vlc_dir is not None:
 
 
 def get_vlc_instance():
-    """Возвращает singleton-инстанс VLC (создаётся один раз)."""
+    """Возвращает singleton-инстанс VLC с оптимизациями для мозаики."""
     global _vlc_instance
     if not VLC_AVAILABLE:
         return None
     if _vlc_instance is None:
         import vlc
         _vlc_instance = vlc.Instance(
-            "--avcodec-hw=any",
-            "--network-caching=300",
-            "--live-caching=300",
+            # Аппаратное декодирование D3D11 (Intel/AMD/NVIDIA)
+            "--avcodec-hw=d3d11va",
+            # АГРЕССИВНАЯ разгрузка декодера: пропуск loop filter (×2 быстрее,
+            # качество чуть хуже — на 480×270 в плитке не видно)
+            "--avcodec-skiploopfilter=all",
+            # Быстрый режим libavcodec
+            "--avcodec-fast",
+            # Явно указать видео-выход и отключить всё лишнее
+            "--no-osd",
+            "--no-video-title-show",
+            "--no-snapshot-preview",
+            "--no-sub-autodetect-file",
+            # Сетевые буферы: меньше — быстрее старт и меньше памяти
+            "--network-caching=200",
+            "--live-caching=200",
+            # Отключить лишние логи
+            "--quiet",
         )
     return _vlc_instance
 

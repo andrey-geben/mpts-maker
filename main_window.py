@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QToolBar, QFileDialog, QMessageBox, QDialog, QFormLayout,
     QLineEdit, QDialogButtonBox, QLabel, QPushButton, QFrame, QPlainTextEdit,
     QApplication, QMenu, QGroupBox, QSpinBox, QDoubleSpinBox,
+    QScrollArea, QGridLayout,
 )
 
 from m3u_parser import Channel, parse_m3u
