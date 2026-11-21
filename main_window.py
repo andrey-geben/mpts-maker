@@ -2,12 +2,13 @@
 # SPDX-License-Identifier: MIT
 
 import math
+import logging
 import os
 from datetime import datetime
 
 import psutil
-from PySide6.QtCore import Qt, QEvent, QByteArray, QThread, Signal, QTimer
-from PySide6.QtGui import QAction, QBrush, QColor, QGuiApplication
+from PySide6.QtCore import QUrl,  Qt, QEvent, QByteArray, QThread, Signal, QTimer
+from PySide6.QtGui import QDesktopServices,  QAction, QBrush, QColor, QGuiApplication
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QTreeWidget,
     QTreeWidgetItem, QTableWidget, QTableWidgetItem, QHeaderView,
@@ -23,6 +24,8 @@ from ffmpeg_manager import (
     check_required_tools, find_tool,
 )
 from system_monitor import SystemMonitor, shutdown_nvml
+logger = logging.getLogger("mpts.ui")
+
 from constants import APP_NAME, APP_COPYRIGHT, APP_VERSION, APP_AUTHOR
 from about_dialog import AboutDialog
 from wizard import MptsWizard
@@ -1156,11 +1159,29 @@ class MainWindow(QMainWindow):
         about_action.triggered.connect(self._show_about)
         help_menu.addAction(about_action)
         help_menu.addSeparator()
+        log_action = QAction("📄 Открыть журнал", self)
+        log_action.setToolTip("Открыть файл mpts-maker.log")
+        log_action.triggered.connect(self._open_log)
+        help_menu.addAction(log_action)
+        help_menu.addSeparator()
         about_qt_action = QAction("О &Qt", self)
         about_qt_action.triggered.connect(
             lambda: QMessageBox.aboutQt(self, f"О Qt — {APP_NAME}")
         )
         help_menu.addAction(about_qt_action)
+
+    def _open_log(self):
+        try:
+            from logging_setup import get_log_path
+            path = get_log_path()
+        except Exception:
+            path = None
+        if not path or not path.exists():
+            QMessageBox.information(
+                self, "Журнал", "Файл журнала ещё не создан."
+            )
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
     def _show_about(self):
         AboutDialog(self).exec()
@@ -1172,6 +1193,8 @@ class MainWindow(QMainWindow):
     # ---------------- проверка утилит ----------------------------------
     def _check_tools_at_startup(self):
         ok, missing = check_required_tools()
+        logger.info("Проверка инструментов: ffmpeg/ffprobe=%s, VLC=%s, missing=%s",
+                    ok, VLC_AVAILABLE, missing)
         if ok and VLC_AVAILABLE:
             return
 
@@ -1353,6 +1376,7 @@ class MainWindow(QMainWindow):
         try:
             self.channels = parse_m3u(path)
         except Exception as e:
+            logger.exception("Не удалось разобрать плейлист %s", path)
             if not silent:
                 QMessageBox.critical(
                     self, "Ошибка",
@@ -1360,6 +1384,7 @@ class MainWindow(QMainWindow):
                 )
             return False
 
+        logger.info("Загружен плейлист %s: каналов %s", path, len(self.channels))
         self._last_playlist = path
         self.working_channels = list(self.channels)
         self._rebuild_tree()
@@ -1514,6 +1539,7 @@ class MainWindow(QMainWindow):
         wiz = MptsWizard(self, existing, preset_channels=available)
         wiz.exec()
         if wiz.created_profiles:
+            logger.info("Мастер создал профилей: %s", len(wiz.created_profiles))
             for name, url, channels in wiz.created_profiles:
                 self._add_profile(name, url, channels)
             self._hint(
@@ -1532,6 +1558,7 @@ class MainWindow(QMainWindow):
             return
         if not dlg.created_profiles:
             return
+        logger.info("Анализ железа создал профилей: %s", len(dlg.created_profiles))
         for name, url, channels in dlg.created_profiles:
             self._add_profile(name, url, channels)
         self._save_session()
@@ -1561,6 +1588,8 @@ class MainWindow(QMainWindow):
          copy_btn, check_btn, mosaic_btn,
          delete_btn) = self._create_action_cell(row, name)
 
+        logger.info("Добавлен MPTS «%s» (%s каналов), URL=%s",
+                    name, len(channels), url)
         self.profiles[name] = {
             "url": url,
             "channels": list(channels),
@@ -1819,6 +1848,7 @@ class MainWindow(QMainWindow):
                         g.child(j).setCheckState(0, Qt.Unchecked)
             finally:
                 self._updating_tree = False
+        logger.info("Удалён MPTS «%s»", name)
         self._hint(f"MPTS «{name}» удалён")
         self._save_session()
 
@@ -1992,6 +2022,7 @@ class MainWindow(QMainWindow):
         status_item.setForeground(QBrush())
         status_item.setToolTip("Идёт pre-flight")
 
+        logger.info("Pre-flight «%s»: %s каналов", name, len(prof["channels"]))
         self._hint(f"Проверка {len(prof['channels'])} каналов для «{name}»…")
         prof["_probe_running"] = True
         worker = _ProbeWorker(prof["channels"], ffmpeg_path,
@@ -2094,6 +2125,7 @@ class MainWindow(QMainWindow):
         proc.status_changed.connect(self._on_status)
         proc.log_line.connect(self._on_log)
         proc.error_occurred.connect(self._on_error)
+        logger.info("Запуск MPTS «%s» на %s", name, prof["url"])
         proc.start()
         prof["process"] = proc
         self._hint(f"Запуск «{name}»… URL: {prof['url']}")
@@ -2101,6 +2133,7 @@ class MainWindow(QMainWindow):
     def _stop_mpts(self, name):
         prof = self.profiles.get(name)
         if prof and prof["process"]:
+            logger.info("Остановка MPTS «%s»", name)
             prof["process"].stop()
             prof["process"] = None
             prof["started_at"] = None
@@ -2124,6 +2157,7 @@ class MainWindow(QMainWindow):
         if not prof:
             return
         prof["last_status"] = status
+        logger.info("Статус «%s»: %s", name, status)
         item = self.table.item(prof["row"], self.STATUS_COL)
         item.setText(status)
         is_running = (status == "Работает")
@@ -2169,6 +2203,8 @@ class MainWindow(QMainWindow):
             return
         prof["last_error"] = (short_reason, full_log)
         prof["last_return_code"] = return_code
+        logger.error("Ошибка «%s» (код %s): %s\n%s",
+                     name, return_code, short_reason, full_log)
         prof["last_log_tail"] = (full_log[-4000:]
                                  if full_log else "(журнал пуст)")
         prof["started_at"] = None
@@ -2195,6 +2231,7 @@ class MainWindow(QMainWindow):
             prof["last_log_tail"] = "\n".join(tail)
         if line.startswith("CMD:"):
             return
+        logger.debug("FFmpeg [%s]: %s", name, line)
         self.log.setText(f"[{name}] {line[:140]}")
 
     # ---------------- клики по таблице ---------------------------------
@@ -2228,6 +2265,7 @@ class MainWindow(QMainWindow):
 
     # ---------------- завершение ---------------------------------------
     def closeEvent(self, event):
+        logger.info("Закрытие главного окна")
         self._save_session()
         self.sys_monitor.stop()
         shutdown_nvml()

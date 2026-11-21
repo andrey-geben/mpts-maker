@@ -1,6 +1,7 @@
 # Copyright (c) 2026 Andrey Geben
 # SPDX-License-Identifier: MIT
 
+import logging
 import os
 import shutil
 import sys
@@ -11,6 +12,8 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 
 from PySide6.QtCore import QObject, Signal
+
+logger = logging.getLogger("mpts.ffmpeg")
 
 
 
@@ -178,6 +181,7 @@ def probe_url(url: str, ffmpeg_path: str = "ffmpeg",
         "-i", url,
         "-t", "0.1", "-f", "null", "-",
     ]
+    logger.debug("probe: %s", " ".join(redact_url(x) for x in cmd))
     try:
         result = subprocess.run(
             cmd,
@@ -308,7 +312,9 @@ class FFmpegProcess(QObject):
                 )
                 return {line.strip().lower() for line in proc.stdout.splitlines()
                         if line.strip()}
-            except Exception:
+            except Exception as exc:
+                logger.warning("ffprobe не смог определить потоки %s: %s",
+                               redact_url(url), exc)
                 return set()
 
         with ThreadPoolExecutor(max_workers=4) as pool:
@@ -324,7 +330,9 @@ class FFmpegProcess(QObject):
         self.last_return_code = None
 
         cmd = self.build_command(self._probe_stream_types())
-        self.log_line.emit(self.name, "CMD: " + " ".join(redact_url(x) for x in cmd))
+        display_cmd = " ".join(redact_url(x) for x in cmd)
+        self.log_line.emit(self.name, "CMD: " + display_cmd)
+        logger.info("CMD [%s]: %s", self.name, display_cmd)
         try:
             proc = subprocess.Popen(
                 cmd,
@@ -353,6 +361,7 @@ class FFmpegProcess(QObject):
 
         self.process = proc
         self._stopping = False
+        logger.info("Запущен FFmpeg [%s], PID=%s", self.name, proc.pid)
         self.status_changed.emit(self.name, "Работает")
 
         threading.Thread(target=self._read_stdout, args=(proc,), daemon=True).start()
@@ -377,6 +386,7 @@ class FFmpegProcess(QObject):
                     pass
         except Exception:
             pass
+        logger.info("Запрошена остановка FFmpeg [%s]", self.name)
         self.status_changed.emit(self.name, "Остановлен")
 
     def _read_stdout(self, proc):
@@ -403,6 +413,7 @@ class FFmpegProcess(QObject):
                 if not line:
                     continue
                 self._stderr_buffer.append(line)
+                logger.warning("FFmpeg [%s]: %s", self.name, line)
                 self.log_line.emit(self.name, line)
         except Exception:
             pass
@@ -414,11 +425,14 @@ class FFmpegProcess(QObject):
             return
         self.last_return_code = rc
         if self._stopping:
+            logger.info("FFmpeg [%s] остановлен", self.name)
             self.status_changed.emit(self.name, "Остановлен")
         elif rc == 0:
+            logger.info("FFmpeg [%s] завершён с кодом 0", self.name)
             self.status_changed.emit(self.name, "Завершён")
         else:
             short = explain_error(list(self._stderr_buffer), rc)
+            logger.error("FFmpeg [%s] код %s: %s", self.name, rc, short)
             full = "\n".join(self._stderr_buffer) or f"(пусто, код возврата {rc})"
             self.status_changed.emit(self.name, "Ошибка")
             self.error_occurred.emit(self.name, short, full, rc)

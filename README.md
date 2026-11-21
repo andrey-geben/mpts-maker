@@ -17,6 +17,7 @@ GUI-приложение для преобразования M3U-плейлис�
 - 🔍 **Pre-flight проверка каналов** перед запуском — недоступные источники отсекаются заранее
 - 📊 **Мониторинг в реальном времени** — статус, FPS, битрейт, CPU, RAM, GPU, сеть
 - 🧠 **Человеко-понятные ошибки** — распознавание типовых проблем FFmpeg + расшифровка кодов возврата Windows NTSTATUS
+- 📄 **Журнал с ротацией** — ошибки FFmpeg, VLC и исключения приложения
 - 💾 **Автосохранение сессии** — профили MPTS, последний плейлист и геометрия окна сохраняются между запусками
 - ✏️ **Управление плейлистом** — редактирование и удаление каналов без изменения файла на диске
 - 🎨 **Управление MPTS** — запуск, остановка, правка состава, удаление профиля
@@ -153,7 +154,7 @@ pip install nuitka ordered-set zstandard
 Сборка (одна строка, PowerShell):
 
 ```powershell
-python -m nuitka --standalone --enable-plugin=pyside6 --windows-console-mode=disable --include-data-files=ffmpeg.exe=ffmpeg.exe --include-data-files=app.ico=app.ico --output-dir=build --assume-yes-for-downloads --windows-icon-from-ico=app.ico --company-name="Andrey Geben" --product-name="MPTS Maker" --file-version=1.3.1.0 --product-version=1.3.1.0 --file-description="M3U to MPTS converter" --copyright="© 2026 Andrey Geben" main.py
+python -m nuitka --standalone --enable-plugin=pyside6 --windows-console-mode=disable --include-data-files=ffmpeg.exe=ffmpeg.exe --include-data-files=app.ico=app.ico --output-dir=build --assume-yes-for-downloads --windows-icon-from-ico=app.ico --company-name="Andrey Geben" --product-name="MPTS Maker" --file-version=1.3.2.0 --product-version=1.3.2.0 --file-description="M3U to MPTS converter" --copyright="© 2026 Andrey Geben" main.py
 ```
 
 Готовый `.exe` появится в `build/main.dist/main.exe`. Запускать **только** из этой папки (рядом должны быть `ffmpeg.exe`, `app.ico` и Qt-библиотеки).
@@ -176,6 +177,7 @@ mpts-maker/
 ├── system_monitor.py     # мониторинг CPU/RAM/GPU/сети (QThread)
 ├── storage.py            # чтение/запись config.json
 ├── constants.py          # метаданные приложения
+├── logging_setup.py      # файловый журнал с ротацией
 ├── about_dialog.py       # диалог «О программе»
 ├── requirements.txt
 ├── ffmpeg.exe            # скачивается отдельно (см. выше)
@@ -197,6 +199,21 @@ mpts-maker/
 Содержит: список MPTS-профилей (имя, URL, каналы), путь к последнему плейлисту, геометрию окна, положение сплиттера. Удаление файла сбрасывает программу к заводским настройкам.
 
 ---
+
+## Журнал
+
+Приложение пишет журнал в:
+
+```text
+%LOCALAPPDATA%\MPTS-Maker\logs\mpts-maker.log
+```
+
+Открыть его можно через меню **«Справка → 📄 Открыть журнал»**.
+
+В журнал попадают запуск приложения, версия, найденные FFmpeg/VLC,
+загрузка плейлиста, запуск/остановка MPTS, команды FFmpeg, его stderr,
+коды завершения и необработанные исключения. Файл ротируется: до 5 МБ,
+хранится 3 резервные копии.
 
 ## Лицензия
 

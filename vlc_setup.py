@@ -1,9 +1,12 @@
 # Copyright (c) 2026 Andrey Geben
 # SPDX-License-Identifier: MIT
 
+import logging
 import os
 import sys
 from pathlib import Path
+
+logger = logging.getLogger("mpts.vlc")
 
 
 def _setup_portable_vlc() -> Path | None:
@@ -25,6 +28,7 @@ def _setup_portable_vlc() -> Path | None:
             os.environ["PYTHON_VLC_LIB_PATH"] = str(libvlc)
             os.environ["PYTHON_VLC_MODULE_PATH"] = str(plugins)
             os.environ["PATH"] = str(vlc_dir) + os.pathsep + os.environ.get("PATH", "")
+            logger.info("Portable VLC: %s", vlc_dir)
             return vlc_dir
     return None
 
@@ -39,8 +43,12 @@ if _vlc_dir is not None:
         import vlc as _vlc  # noqa: F401
         _vlc.libvlc_get_version()
         VLC_AVAILABLE = True
-    except Exception:
+        logger.info("VLC загружен, версия: %s", _vlc.libvlc_get_version())
+    except Exception as exc:
         VLC_AVAILABLE = False
+        logger.exception("Не удалось загрузить VLC: %s", exc)
+else:
+    logger.warning("Папка vlc_lib не найдена — мозаика недоступна")
 
 
 def get_vlc_instance():
@@ -79,5 +87,5 @@ def release_vlc_instance():
         try:
             _vlc_instance.release()
         except Exception:
-            pass
+            logger.exception("Ошибка освобождения VLC")
         _vlc_instance = None
