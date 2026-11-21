@@ -1050,6 +1050,13 @@ class MainWindow(QMainWindow):
             a.triggered.connect(slot)
             tb.addAction(a)
 
+        tb.addSeparator()
+        log_action = QAction("📄 Журнал", self)
+        log_action.setToolTip("Открыть файл журнала mpts-maker.log")
+        log_action.setStatusTip("Открыть файл журнала приложения")
+        log_action.triggered.connect(self._open_log)
+        tb.addAction(log_action)
+
         central = QWidget()
         self.setCentralWidget(central)
         vbox = QVBoxLayout(central)
