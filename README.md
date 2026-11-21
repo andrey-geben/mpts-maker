@@ -84,6 +84,7 @@ pip install -r requirements.txt
 PySide6>=6.5
 psutil>=5.9
 nvidia-ml-py>=12.0
+python-vlc>=3.0
 ```
 
 ---

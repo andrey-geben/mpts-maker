@@ -21,19 +21,30 @@ def app_dir() -> str:
     return os.path.dirname(os.path.abspath(__file__))
 
 
+def _search_dirs() -> list[str]:
+    """Каталоги, где могут лежать утилиты (включая _internal PyInstaller 6)."""
+    dirs = [app_dir(), os.path.join(app_dir(), "_internal")]
+    meipass = getattr(sys, "_MEIPASS", "")
+    if meipass:
+        dirs.append(meipass)
+    result: list[str] = []
+    for d in dirs:
+        if d and d not in result:
+            result.append(d)
+    return result
+
+
 def find_tool(name: str) -> str | None:
     """
-    Ищет утилиту в такой последовательности:
-      1. рядом с приложением (ffmpeg.exe / ffmpeg)
-      2. в PATH
+    Ищет утилиту рядом с приложением, в _internal, _MEIPASS и PATH.
     Возвращает полный путь или None.
     """
-    base = app_dir()
     candidates = [name + ".exe", name] if os.name == "nt" else [name]
-    for fname in candidates:
-        p = os.path.join(base, fname)
-        if os.path.isfile(p):
-            return p
+    for base in _search_dirs():
+        for fname in candidates:
+            p = os.path.join(base, fname)
+            if os.path.isfile(p):
+                return p
     return shutil.which(name)
 
 

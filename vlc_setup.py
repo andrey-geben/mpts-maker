@@ -13,17 +13,20 @@ def _setup_portable_vlc() -> Path | None:
     else:
         base_dir = Path(__file__).parent
 
-    vlc_dir = base_dir / "vlc_lib"
-    libvlc = vlc_dir / "libvlc.dll"
-    plugins = vlc_dir / "plugins"
+    candidates = [base_dir / "vlc_lib", base_dir / "_internal" / "vlc_lib"]
+    meipass = getattr(sys, "_MEIPASS", "")
+    if meipass:
+        candidates.append(Path(meipass) / "vlc_lib")
 
-    if not vlc_dir.is_dir() or not libvlc.exists() or not plugins.is_dir():
-        return None
-
-    os.environ["PYTHON_VLC_LIB_PATH"] = str(libvlc)
-    os.environ["PYTHON_VLC_MODULE_PATH"] = str(plugins)
-    os.environ["PATH"] = str(vlc_dir) + os.pathsep + os.environ.get("PATH", "")
-    return vlc_dir
+    for vlc_dir in candidates:
+        libvlc = vlc_dir / "libvlc.dll"
+        plugins = vlc_dir / "plugins"
+        if vlc_dir.is_dir() and libvlc.exists() and plugins.is_dir():
+            os.environ["PYTHON_VLC_LIB_PATH"] = str(libvlc)
+            os.environ["PYTHON_VLC_MODULE_PATH"] = str(plugins)
+            os.environ["PATH"] = str(vlc_dir) + os.pathsep + os.environ.get("PATH", "")
+            return vlc_dir
+    return None
 
 
 _vlc_dir = _setup_portable_vlc()
