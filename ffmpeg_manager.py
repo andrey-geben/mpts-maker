@@ -8,6 +8,7 @@ import re
 import subprocess
 import threading
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 
 from PySide6.QtCore import QObject, Signal
 
@@ -34,6 +35,11 @@ def find_tool(name: str) -> str | None:
         if os.path.isfile(p):
             return p
     return shutil.which(name)
+
+
+def redact_url(url: str) -> str:
+    """Маскирует логин/пароль в URL для журналов и ошибок."""
+    return re.sub(r"(://[^/@:]+:)[^/@]+(@)", r"\1***\2", url)
 
 
 def check_required_tools() -> tuple[bool, list[str]]:
@@ -179,6 +185,10 @@ def probe_url(url: str, ffmpeg_path: str = "ffmpeg",
 
     stderr = result.stderr or ""
 
+    if result.returncode == 0:
+        return True, ""
+
+    # Ненулевой код нельзя считать успехом, даже если stderr пуст.
     failure_signals = (
         "Error opening input",
         "End of file",
@@ -189,7 +199,7 @@ def probe_url(url: str, ffmpeg_path: str = "ffmpeg",
         "Name or service not known",
         "Protocol not found",
     )
-    if any(sig in stderr for sig in failure_signals):
+    if any(sig.lower() in stderr.lower() for sig in failure_signals) or stderr.strip():
         for pattern, explanation in ERROR_PATTERNS:
             if re.search(pattern, stderr, re.IGNORECASE):
                 return False, explanation
@@ -197,9 +207,9 @@ def probe_url(url: str, ffmpeg_path: str = "ffmpeg",
             line = line.strip()
             if line and not line.startswith("["):
                 return False, line[:160]
-        return False, "Не удалось открыть поток."
-
-    return True, ""
+        if stderr.strip():
+            return False, "Не удалось открыть поток."
+    return False, explain_return_code(result.returncode)
 
 
 class FFmpegProcess(QObject):
@@ -210,18 +220,21 @@ class FFmpegProcess(QObject):
     error_occurred = Signal(str, str, str, "qint64")  # (name, причина, журнал, код)
 
     def __init__(self, name: str, urls: list[str], output_url: str,
-                 ffmpeg_path: str = "ffmpeg", parent=None):
+                 ffmpeg_path: str = "ffmpeg", ffprobe_path: str | None = None,
+                 parent=None):
         super().__init__(parent)
         self.name = name
         self.urls = urls
         self.output_url = output_url
         self.ffmpeg_path = ffmpeg_path
+        self.ffprobe_path = ffprobe_path or find_tool("ffprobe") or "ffprobe"
+        self._stream_types: list[set[str]] | None = None
         self.process: subprocess.Popen | None = None
         self._stopping = False
         self._stderr_buffer: deque[str] = deque(maxlen=200)
         self.last_return_code: int | None = None
 
-    def build_command(self) -> list[str]:
+    def build_command(self, stream_types: list[set[str]] | None = None) -> list[str]:
         cmd = [
             self.ffmpeg_path,
             "-hide_banner", "-nostdin",
@@ -237,20 +250,61 @@ class FFmpegProcess(QObject):
                         "-reconnect_delay_max", "5"]
             cmd += ["-i", url]
 
-        # Используем 'title' для задания имени сервиса (service_name) в SDT
+        # st=... задаёт индексы потоков внутри конкретной программы,
+        # а не глобальные индексы выхода. Видео и аудио опциональны.
+        if stream_types is None:
+            stream_types = self._probe_stream_types()
         for i, url in enumerate(self.urls):
-            cmd += [
-                "-program", f"title=Channel_{i + 1}:st={i * 2}:st={i * 2 + 1}",
-                "-map", f"{i}:v?", "-map", f"{i}:a?"
-            ]
+            types = stream_types[i] if i < len(stream_types) else {"video", "audio"}
+            maps: list[str] = []
+            stream_indexes: list[str] = []
+            if "video" in types:
+                maps += [f"{i}:v?"]
+                stream_indexes.append(str(len(maps) - 1))
+            if "audio" in types:
+                maps += [f"{i}:a?"]
+                stream_indexes.append(str(len(maps) - 1))
+            if not maps:
+                maps = [f"{i}:v?"]
+                stream_indexes = ["0"]
+            cmd.append("-program")
+            cmd.append(f"title=Channel_{i + 1}:" +
+                       ":".join(f"st={idx}" for idx in stream_indexes))
+            for m in maps:
+                cmd += ["-map", m]
 
         cmd += ["-c", "copy"]
-        cmd += ["-bsf:v", "dump_extra=freq=keyframe"]
+        # dump_extra несовместим с несколькими -program (ломает muxing);
+        # resend_headers достаточно для MPTS-клиентов.
         cmd += ["-mpegts_flags", "+resend_headers+initial_discontinuity"]
         cmd += ["-muxdelay", "0.1", "-muxpreload", "0.1"]
         cmd += ["-f", "mpegts", self.output_url]
 
         return cmd
+
+    def _probe_stream_types(self) -> list[set[str]]:
+        """Определяет наличие видео/аудио, чтобы корректно собрать программы."""
+        if self._stream_types is not None:
+            return self._stream_types
+        def probe_one(url: str) -> set[str]:
+            try:
+                proc = subprocess.run(
+                    [self.ffprobe_path, "-v", "error",
+                     "-show_entries", "stream=codec_type", "-of", "csv=p=0", url],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL, timeout=5,
+                    text=True, encoding="utf-8", errors="replace",
+                )
+                return {line.strip().lower() for line in proc.stdout.splitlines()
+                        if line.strip()}
+            except Exception:
+                return set()
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            result = list(pool.map(probe_one, self.urls))
+        result = [t or {"video", "audio"} for t in result]
+        self._stream_types = result
+        return result
 
     def start(self):
         if self.process and self.process.poll() is None:
@@ -258,8 +312,8 @@ class FFmpegProcess(QObject):
         self._stderr_buffer.clear()
         self.last_return_code = None
 
-        cmd = self.build_command()
-        self.log_line.emit(self.name, "CMD: " + " ".join(cmd))
+        cmd = self.build_command(self._probe_stream_types())
+        self.log_line.emit(self.name, "CMD: " + " ".join(redact_url(x) for x in cmd))
         try:
             proc = subprocess.Popen(
                 cmd,
@@ -295,18 +349,24 @@ class FFmpegProcess(QObject):
         threading.Thread(target=self._wait_exit,  args=(proc,), daemon=True).start()
 
     def stop(self):
-        if not self.process:
+        proc = self.process
+        if not proc:
             return
         self._stopping = True
+        self.process = None
         try:
-            self.process.terminate()
+            proc.terminate()
             try:
-                self.process.wait(timeout=3)
+                proc.wait(timeout=3)
             except subprocess.TimeoutExpired:
-                self.process.kill()
+                proc.kill()
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    pass
         except Exception:
             pass
-        self.process = None
+        self.status_changed.emit(self.name, "Остановлен")
 
     def _read_stdout(self, proc):
         stats: dict = {}
@@ -338,6 +398,9 @@ class FFmpegProcess(QObject):
 
     def _wait_exit(self, proc):
         rc = proc.wait()
+        # Старый процесс после stop()+start() не должен перезаписывать статус нового.
+        if self.process is not proc:
+            return
         self.last_return_code = rc
         if self._stopping:
             self.status_changed.emit(self.name, "Остановлен")

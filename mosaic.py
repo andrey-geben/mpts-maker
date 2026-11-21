@@ -82,11 +82,10 @@ class VlcTile(QFrame):
 
     def _build_url(self) -> str:
         url = self.base_url
-        if "?" in url:
-            url = url.split("?")[0]
         if url.startswith("udp://") and not url.startswith("udp://@"):
             url = "udp://@" + url[len("udp://"):]
-        return f"{url}?overrun_nonfatal=1&fifo_size=524288"
+        sep = "&" if "?" in url else "?"
+        return f"{url}{sep}overrun_nonfatal=1&fifo_size=524288"
 
     def start_playing(self):
         if self.player is not None:
@@ -212,7 +211,8 @@ class MosaicWindow(QDialog):
         n = len(self.channels)
         if n == 0:
             return 1
-        return (n + PAGE_SIZE - 1) // PAGE_SIZE
+        visible = max(1, self._visible_count())
+        return (n + visible - 1) // visible
 
     def _visible_count(self) -> int:
         return self._grid_cols * self._grid_rows
@@ -318,8 +318,9 @@ class MosaicWindow(QDialog):
         self._load_page(self.page)
 
     def _chunk_for_page(self, page: int) -> list[Channel]:
-        start = page * PAGE_SIZE
-        end = min(start + PAGE_SIZE, len(self.channels))
+        visible = max(1, self._visible_count())
+        start = page * visible
+        end = min(start + visible, len(self.channels))
         return self.channels[start:end]
 
     def _load_page(self, page: int):
@@ -346,10 +347,9 @@ class MosaicWindow(QDialog):
         QTimer.singleShot(300, self._create_tiles_for_current_page)
 
     def _create_tiles_for_current_page(self):
+        visible = max(1, self._visible_count())
         chunk = self._chunk_for_page(self.page)
-        start_num = self.page * PAGE_SIZE + 1
-        visible = self._visible_count()
-        chunk = chunk[:visible]
+        start_num = self.page * visible + 1
 
         for i, ch in enumerate(chunk):
             tile = VlcTile(
@@ -373,8 +373,9 @@ class MosaicWindow(QDialog):
     def _refresh_pagination_ui(self):
         total = self.total_pages
         cur = self.page + 1
-        start_num = self.page * PAGE_SIZE + 1
-        end_num = min(start_num + PAGE_SIZE - 1, len(self.channels))
+        visible = max(1, self._visible_count())
+        start_num = self.page * visible + 1
+        end_num = min(start_num + visible - 1, len(self.channels))
         n_here = end_num - start_num + 1
         n_total = len(self.channels)
 

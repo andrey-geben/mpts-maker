@@ -86,7 +86,8 @@ def analyze(hw: HardwareProfile, num_channels: int,
     cpu_capacity = hw.cpu_logical * CPU_SAFE_LOAD * 100
     rec.max_channels_by_cpu = max(1, int(cpu_capacity / CPU_PERCENT_PER_CHANNEL))
 
-    ram_capacity = hw.ram_total_mb * RAM_SAFE_LOAD
+    available_mb = max(0, hw.ram_total_mb - hw.ram_used_mb)
+    ram_capacity = available_mb * RAM_SAFE_LOAD
     rec.max_channels_by_ram = max(1, int(ram_capacity / RAM_MB_PER_CHANNEL))
 
     if hw.max_net_mbps > 0:
@@ -120,8 +121,13 @@ def analyze(hw: HardwareProfile, num_channels: int,
         )
     if num_channels > rec.max_channels_by_ram:
         rec.warnings.append(
-            f"Каналов больше, чем потянет RAM ({rec.max_channels_by_ram}). "
+            f"Каналов больше, чем потянет свободная RAM ({rec.max_channels_by_ram}). "
             f"Может не хватить памяти."
+        )
+    if hw.ram_load >= 85:
+        rec.warnings.append(
+            f"Оперативная память уже загружена на {hw.ram_load:.0f}% — "
+            f"закройте лишние приложения перед запуском."
         )
     if num_channels > rec.max_channels_by_net:
         rec.warnings.append(

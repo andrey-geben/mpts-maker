@@ -42,4 +42,5 @@ Thumbs.db
 desktop.ini
 MPTS-Maker.spec
 
-
+# Локальные релизные архивы
+/*.zip

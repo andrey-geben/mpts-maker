@@ -12,8 +12,22 @@ class Channel:
 
 
 # #EXTINF:-1 tvg-id="x" group-title="Y",Channel Name
-EXTINF_RE = re.compile(r'#EXTINF:\s*-?\d+(?:\.\d+)?\s*(.*?),(.*)')
-ATTR_RE = re.compile(r'([\w-]+)="([^"]*)"')
+ATTR_RE = re.compile(r'([\w-]+)\s*=\s*["\']([^"\']*)["\']')
+
+
+def _split_extinf(line: str) -> tuple[str, str]:
+    """Делит EXTINF по первой запятой вне кавычек (запятые бывают в group-title)."""
+    body = line[len("#EXTINF:"):]
+    quote = None
+    for i, ch in enumerate(body):
+        if ch in "\"'":
+            if quote is None:
+                quote = ch
+            elif quote == ch:
+                quote = None
+        elif ch == "," and quote is None:
+            return body[:i], body[i + 1:]
+    return body, ""
 
 
 def _read_text(path: str) -> str:
@@ -39,10 +53,8 @@ def parse_m3u(path: str) -> list[Channel]:
             continue
 
         if line.startswith("#EXTINF:"):
-            m = EXTINF_RE.match(line)
-            if not m:
-                continue
-            attrs_str, current_name = m.group(1), m.group(2).strip()
+            attrs_str, current_name = _split_extinf(line)
+            current_name = current_name.strip()
             current_attrs = dict(ATTR_RE.findall(attrs_str))
         elif line.startswith("#"):
             continue

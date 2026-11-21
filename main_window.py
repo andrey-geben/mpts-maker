@@ -1966,6 +1966,9 @@ class MainWindow(QMainWindow):
                 and prof["process"].process.poll() is None:
             self._hint(f"«{name}» уже запущен")
             return
+        if prof.get("_probe_running"):
+            self._hint(f"«{name}»: проверка каналов уже идёт")
+            return
 
         ffmpeg_path = find_tool("ffmpeg")
         if not ffmpeg_path:
@@ -1990,6 +1993,7 @@ class MainWindow(QMainWindow):
         status_item.setToolTip("Идёт pre-flight")
 
         self._hint(f"Проверка {len(prof['channels'])} каналов для «{name}»…")
+        prof["_probe_running"] = True
         worker = _ProbeWorker(prof["channels"], ffmpeg_path,
                               timeout_s=5, parent=self)
         worker.done.connect(
@@ -2003,6 +2007,7 @@ class MainWindow(QMainWindow):
         prof = self.profiles.get(name)
         if not prof:
             return
+        prof["_probe_running"] = False
         self._probe_workers = self._clean_workers(self._probe_workers)
 
         ok_channels = [ch for ch, ok, _ in results if ok]

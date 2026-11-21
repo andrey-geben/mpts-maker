@@ -4,11 +4,11 @@
 from datetime import date
 
 APP_NAME        = "MPTS Maker"
-APP_VERSION     = "1.0.0"
+APP_VERSION     = "1.3.1"
 APP_AUTHOR      = "Andrey Geben"
 APP_YEAR        = str(date.today().year)
 APP_COPYRIGHT   = f"© {APP_YEAR} {APP_AUTHOR}"
-APP_GITHUB      = "https://github.com/andrey-geben/VHS-Sat-Lite"
+APP_GITHUB      = "https://github.com/andrey-geben/mpts-maker"
 APP_LICENSE     = "MIT"
 APP_DESCRIPTION = (
     "Преобразует M3U-плейлист в один или несколько MPTS-потоков "

@@ -21,7 +21,6 @@ GUI-приложение для преобразования M3U-плейлис�
 - ✏️ **Управление плейлистом** — редактирование и удаление каналов без изменения файла на диске
 - 🎨 **Управление MPTS** — запуск, остановка, правка состава, удаление профиля
 - 🇷🇺 **Полностью русский интерфейс** с подсказками
-- ```markdown
 - 🎬 **Мозаика** — визуальный контроль всех каналов MPTS в одном окне (через portable VLC)
 - 🎛 **Редактор плейлиста** — фильтрация, поиск, отметка «рабочих», редактирование имён/групп/URL, добавление/удаление, сохранение в файл
 - 🖥 **Анализ железа** — оценка предела системы (CPU/RAM/сеть) и автогенерация профилей MPTS по параметрам
@@ -34,15 +33,6 @@ GUI-приложение для преобразования M3U-плейлис�
   - `avcodec-fast` (×1.5)
   - `no-audio` (полное отключение аудио-кодека, −10–15% CPU)
   - `vdec-width/height=480×270`
-## Скриншоты
-
-> _Добавьте сюда скриншот главного окна, мастера и диалога ошибки — это сильно улучшит восприятие репозитория._
-
-```
-screenshots/main.png
-screenshots/wizard.png
-screenshots/error.png
-```
 
 ---
 
@@ -162,7 +152,7 @@ pip install nuitka ordered-set zstandard
 Сборка (одна строка, PowerShell):
 
 ```powershell
-python -m nuitka --standalone --enable-plugin=pyside6 --windows-console-mode=disable --include-data-files=ffmpeg.exe=ffmpeg.exe --include-data-files=app.ico=app.ico --output-dir=build --assume-yes-for-downloads --windows-icon-from-ico=app.ico --company-name="Andrey Geben" --product-name="MPTS Maker" --file-version=1.0.0.0 --product-version=1.0.0.0 --file-description="M3U to MPTS converter" --copyright="© 2026 Andrey Geben" main.py
+python -m nuitka --standalone --enable-plugin=pyside6 --windows-console-mode=disable --include-data-files=ffmpeg.exe=ffmpeg.exe --include-data-files=app.ico=app.ico --output-dir=build --assume-yes-for-downloads --windows-icon-from-ico=app.ico --company-name="Andrey Geben" --product-name="MPTS Maker" --file-version=1.3.1.0 --product-version=1.3.1.0 --file-description="M3U to MPTS converter" --copyright="© 2026 Andrey Geben" main.py
 ```
 
 Готовый `.exe` появится в `build/main.dist/main.exe`. Запускать **только** из этой папки (рядом должны быть `ffmpeg.exe`, `app.ico` и Qt-библиотеки).
