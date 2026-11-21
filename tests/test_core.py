@@ -32,6 +32,13 @@ class M3UParserTests(unittest.TestCase):
 
 
 class FFmpegHelpersTests(unittest.TestCase):
+    def test_mpts_program_streams_are_global(self):
+        proc = FFmpegProcess("test", ["a", "b"], "udp://239.0.0.1:1234")
+        proc._stream_types = [{"video", "audio"}, {"video", "audio"}]
+        cmd = proc.build_command()
+        self.assertIn("title=Channel_1:st=0:st=1", cmd)
+        self.assertIn("title=Channel_2:st=2:st=3", cmd)
+
     def test_redact_url(self):
         self.assertEqual(
             redact_url("http://user:secret@example.com/live"),
@@ -57,7 +64,7 @@ class FFmpegHelpersTests(unittest.TestCase):
         proc._stream_types = [{"video"}, {"video", "audio"}]
         cmd = proc.build_command()
         self.assertIn("title=Channel_1:st=0", cmd)
-        self.assertIn("title=Channel_2:st=0:st=1", cmd)
+        self.assertIn("title=Channel_2:st=1:st=2", cmd)
 
 
 if __name__ == "__main__":

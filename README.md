@@ -154,7 +154,7 @@ pip install nuitka ordered-set zstandard
 Сборка (одна строка, PowerShell):
 
 ```powershell
-python -m nuitka --standalone --enable-plugin=pyside6 --windows-console-mode=disable --include-data-files=ffmpeg.exe=ffmpeg.exe --include-data-files=app.ico=app.ico --output-dir=build --assume-yes-for-downloads --windows-icon-from-ico=app.ico --company-name="Andrey Geben" --product-name="MPTS Maker" --file-version=1.3.3.0 --product-version=1.3.3.0 --file-description="M3U to MPTS converter" --copyright="© 2026 Andrey Geben" main.py
+python -m nuitka --standalone --enable-plugin=pyside6 --windows-console-mode=disable --include-data-files=ffmpeg.exe=ffmpeg.exe --include-data-files=app.ico=app.ico --output-dir=build --assume-yes-for-downloads --windows-icon-from-ico=app.ico --company-name="Andrey Geben" --product-name="MPTS Maker" --file-version=1.3.4.0 --product-version=1.3.4.0 --file-description="M3U to MPTS converter" --copyright="© 2026 Andrey Geben" main.py
 ```
 
 Готовый `.exe` появится в `build/main.dist/main.exe`. Запускать **только** из этой папки (рядом должны быть `ffmpeg.exe`, `app.ico` и Qt-библиотеки).

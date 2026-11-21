@@ -269,19 +269,23 @@ class FFmpegProcess(QObject):
         # а не глобальные индексы выхода. Видео и аудио опциональны.
         if stream_types is None:
             stream_types = self._probe_stream_types()
+        output_index = 0
         for i, url in enumerate(self.urls):
             types = stream_types[i] if i < len(stream_types) else {"video", "audio"}
             maps: list[str] = []
             stream_indexes: list[str] = []
             if "video" in types:
                 maps += [f"{i}:v?"]
-                stream_indexes.append(str(len(maps) - 1))
+                stream_indexes.append(str(output_index))
+                output_index += 1
             if "audio" in types:
                 maps += [f"{i}:a?"]
-                stream_indexes.append(str(len(maps) - 1))
+                stream_indexes.append(str(output_index))
+                output_index += 1
             if not maps:
                 maps = [f"{i}:v?"]
-                stream_indexes = ["0"]
+                stream_indexes = [str(output_index)]
+                output_index += 1
             cmd.append("-program")
             cmd.append(f"title=Channel_{i + 1}:" +
                        ":".join(f"st={idx}" for idx in stream_indexes))
